@@ -1,6 +1,8 @@
 import socket
 import struct
 import time
+import json
+import os
 from datetime import datetime
 
 try:
@@ -18,6 +20,7 @@ LS_HOST = "pss-login.pss.igotgames.net"
 LS_PORT = 9310
 
 LOG_FILE = "fatewar_bot.log"
+STATE_FILE = "fatewar_state.json"
 
 
 def log_event(text):
@@ -31,6 +34,32 @@ def log_event(text):
             f.write(line + "\n")
     except Exception:
         pass  # on ne bloque jamais le bot pour un souci d'ecriture de log
+
+
+def load_state():
+    """Charge l'etat persistant (timestamps de fin d'entrainement/amelioration
+    connus lors de la derniere execution) depuis STATE_FILE. Permet au bot
+    de reprendre intelligemment apres un plantage/redemarrage au lieu de
+    repartir de zero sans savoir ou en etaient les casernes. Retourne un
+    dict vide si le fichier n'existe pas encore ou est invalide."""
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(state):
+    """Sauvegarde l'etat persistant sur disque. Appelee a chaque fois
+    qu'un nouveau timestamp de fin est connu, pour que le bot puisse
+    reprendre correctement s'il redemarre avant l'echeance."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass  # on ne bloque jamais le bot pour un souci d'ecriture d'etat
 
 
 # ============================================================================
@@ -155,15 +184,17 @@ def build_ls_login_packet():
     return build_frame("9d27", body)
 
 
-def do_ls_login():
-    print("=== LOGIN LS ===")
+def do_ls_login(ls_host=None, ls_port=None):
+    ls_host = ls_host or LS_HOST
+    ls_port = ls_port or LS_PORT
+    print("=== LOGIN LS (" + ls_host + ":" + str(ls_port) + ") ===")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(10)
     gs_host = None
     gs_port = None
     login_session = None
     try:
-        sock.connect((LS_HOST, LS_PORT))
+        sock.connect((ls_host, ls_port))
         print("Connecte au LS.")
         time.sleep(0.2)
 
@@ -433,6 +464,31 @@ def collect_resource(sock, currency_type):
         log_event("Collecte de ressource : +" + str(value) + " " + name)
 
 
+def decode_train_end_time(response, barrack_id):
+    """Cherche un ou plusieurs messages UpdateTrainNotice (10401) dans la
+    reponse et retourne le end_time (timestamp Unix) de celui qui
+    correspond a barrack_id, si trouve. Ce message est souvent inclus
+    automatiquement dans la reponse d'un TrainRequest reussi, ou pousse
+    plus tard par le serveur - plusieurs peuvent arriver ensemble si tu as
+    plusieurs casernes actives."""
+    notices = find_all_messages_of_type(response, 10401)
+    for notice_body in notices:
+        fields = walk_protobuf(notice_body)
+        for fn, wt, val in fields:
+            if fn == 1 and wt == "bytes":  # champ "work" (TrainWorkInfo)
+                work_fields = walk_protobuf(val)
+                work_barrack_id = None
+                work_end_time = None
+                for wfn, wwt, wval in work_fields:
+                    if wfn == 7:  # barrack_id
+                        work_barrack_id = wval
+                    elif wfn == 4:  # end_time
+                        work_end_time = wval
+                if work_barrack_id == barrack_id and work_end_time:
+                    return work_end_time
+    return None
+
+
 def train_troops(sock, barrack_id, army_id, count):
     print("\n=== ACTION : Entrainement de troupes (armee=" + str(army_id) +
           ", quantite=" + str(count) + ", caserne=" + str(barrack_id) + ") ===")
@@ -450,12 +506,14 @@ def train_troops(sock, barrack_id, army_id, count):
 
     if total == 0:
         print("Aucune reponse.")
-        return
+        return None
+
+    end_time = decode_train_end_time(response, barrack_id)
 
     reply_body = find_message_of_type(response, 10403)  # kMsgGS2CLTrainReply
     if reply_body is None:
         print("Message TrainReply non trouve dans la reponse.")
-        return
+        return end_time
 
     fields = walk_protobuf(reply_body)
     has_error = any(fn == 99 for fn, wt, val in fields)
@@ -471,6 +529,47 @@ def train_troops(sock, barrack_id, army_id, count):
     else:
         log_event("Entrainement lance : " + str(count) + "x armee " + str(army_id) +
                    " (caserne " + str(barrack_id) + ")")
+        if end_time:
+            remaining = end_time - int(time.time())
+            print("Fin de l'entrainement dans " + str(remaining) + " secondes " +
+                  "(timestamp " + str(end_time) + ").")
+
+    return end_time
+
+
+def claim_finished_training(sock, barrack_id):
+    """Recupere les troupes d'un entrainement termine (equivalent au clic
+    manuel sur le bouton de recuperation dans l'app). Confirme par capture
+    reseau : kMsgCL2GSDealArmyRequest, ne prend que le barrack_id en
+    parametre. Retourne True si la recuperation a reussi (caserne donc
+    libre pour un nouvel entrainement), False sinon."""
+    print("\n=== ACTION : Recuperation des troupes entrainees (caserne " +
+          str(barrack_id) + ") ===")
+    body = encode_field_varint(1, barrack_id)
+    packet = build_frame("ac28", body)  # kMsgCL2GSDealArmyRequest = 10412
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return False
+
+    reply_body = find_message_of_type(response, 10413)  # kMsgGS2CLDealArmyReply
+    if reply_body is None:
+        print("Message DealArmyReply non trouve dans la reponse.")
+        return False
+
+    fields = walk_protobuf(reply_body)
+    has_error = any(fn == 99 for fn, wt, val in fields)
+
+    if has_error:
+        error_code = next(val for fn, wt, val in fields if fn == 99)
+        print("Echec de la recuperation, code erreur : " + str(error_code))
+        return False
+    else:
+        log_event("Troupes recuperees (caserne " + str(barrack_id) + ")")
+        return True
 
 
 def claim_daily_signin_reward(sock, day=1):
@@ -560,27 +659,16 @@ def claim_task_reward(sock, task_id):
         print("Tache reclamee avec succes !")
 
 
-def check_and_claim_completed_tasks(sock):
-    """Ecoute les notifications de mise a jour de taches (poussees
-    automatiquement par le serveur, pas de requete dediee pour lister les
-    taches) et reclame automatiquement celles au statut 'Award' (terminee,
-    recompense en attente).
-
-    A appeler apres la phase de synchronisation, ou pendant le heartbeat -
-    les notifications peuvent arriver a tout moment, pas seulement juste
-    apres le login."""
-    print("\n=== VERIFICATION : Taches terminees en attente de recompense ===")
-
-    # On lit ce qui traine deja dans le buffer socket (sans bloquer longtemps)
-    response, total = recv_all(sock, drain_seconds=2)
-    if total == 0:
-        print("Rien recu pour l'instant.")
-        return
-
+def scan_and_claim_tasks_in_data(sock, response):
+    """Cherche des TaskPeriodUpdateNotice (11749) dans un buffer deja recu
+    (par exemple la reponse d'un keepalive) et reclame automatiquement
+    celles au statut 'Award' (terminee, recompense en attente). Reutilisable
+    partout ou on recoit des donnees du serveur, pas seulement juste apres
+    le login - une quete peut se terminer a tout moment pendant que le bot
+    tourne."""
     task_notices = find_all_messages_of_type(response, 11749)  # TaskPeriodUpdateNotice
     if not task_notices:
-        print("Aucune notification de tache dans ce lot de donnees.")
-        return
+        return 0
 
     claimed_count = 0
     for notice_body in task_notices:
@@ -596,30 +684,286 @@ def check_and_claim_completed_tasks(sock):
                     elif tfn == 2:
                         status = tval
                 if task_id is not None and status == 2:  # kTaskStatusAward
-                    print("Tache #" + str(task_id) + " terminee, reclamation...")
+                    print("\nTache #" + str(task_id) + " terminee, reclamation...")
                     claim_task_reward(sock, task_id)
                     claimed_count += 1
                     time.sleep(2)
 
+    return claimed_count
+
+
+def check_and_claim_completed_tasks(sock):
+    """Version 'a la demande' : lit ce qui traine dans le buffer socket
+    maintenant et reclame les taches trouvees. Utile juste apres le login,
+    mais ne suffit pas seule pour capter les taches terminees plus tard -
+    voir scan_and_claim_tasks_in_data() pour l'integrer a une boucle
+    d'ecoute continue (deja fait dans gs_bot.py)."""
+    print("\n=== VERIFICATION : Taches terminees en attente de recompense ===")
+
+    response, total = recv_all(sock, drain_seconds=2)
+    if total == 0:
+        print("Rien recu pour l'instant.")
+        return
+
+    claimed_count = scan_and_claim_tasks_in_data(sock, response)
     if claimed_count == 0:
         print("Aucune tache prete a etre reclamee pour le moment.")
 
 
+def check_and_claim_mail(sock):
+    """Liste le courrier, repere les mails avec une piece jointe non
+    reclamee (read_flag=2, kMailFlagNotExtract) et les reclame
+    automatiquement (read_flag=6, kMailFlagCollect envoye dans
+    MailOperatorRequest)."""
+    print("\n=== VERIFICATION : Courrier avec pieces jointes ===")
+
+    # Liste vide = on demande tout le courrier disponible
+    packet = build_frame("8527", b"")  # kMsgCL2GSMailListRequest = 10117
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 10118)  # MailListReply
+    if reply_body is None:
+        print("Message MailListReply non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    unclaimed_ids = []
+    total_mail = 0
+    for fn, wt, val in fields:
+        if fn == 1 and wt == "bytes":
+            mail_fields = walk_protobuf(val)
+            mail_id = None
+            read_flag = None
+            for mfn, mwt, mval in mail_fields:
+                if mfn == 1:
+                    mail_id = mval
+                elif mfn == 10:
+                    read_flag = mval
+            if mail_id is not None:
+                total_mail += 1
+                if read_flag == 2:  # kMailFlagNotExtract
+                    unclaimed_ids.append(mail_id)
+
+    print(str(total_mail) + " mail(s) au total, " + str(len(unclaimed_ids)) +
+          " avec piece jointe non reclamee.")
+
+    if not unclaimed_ids:
+        return
+
+    body = b""
+    for mail_id in unclaimed_ids:
+        tag = (1 << 3) | 0
+        body += encode_varint(tag) + encode_varint(mail_id)
+    body += encode_field_varint(2, 6)  # read_flag = kMailFlagCollect
+
+    packet = build_frame("8827", body)  # kMsgCL2GSMailOperatorRequest = 10120
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+
+    if total == 0:
+        print("Aucune reponse a la reclamation.")
+        return
+
+    reply_body = find_message_of_type(response, 10121)  # MailOperatorReply
+    if reply_body is None:
+        print("Message MailOperatorReply non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = False
+    for fn, wt, val in fields:
+        if fn == 99:
+            has_error = True
+            print("Erreur, code : " + str(val))
+        elif fn == 4 and wt == "bytes":
+            resources = decode_resource_set(val)
+            for r in resources:
+                res_name = CURRENCY_NAMES.get(r.get("res_type"), "Type " + str(r.get("res_type")))
+                log_event("Courrier reclame : +" + str(r.get("value", 0)) + " " + res_name)
+
+    if not has_error:
+        print("Courrier reclame avec succes (" + str(len(unclaimed_ids)) + " mail(s)) !")
+
+
+def decode_building_end_time(response, building_id):
+    """Cherche un message CityBuildQueueNotice (10029) dans la reponse et
+    retourne le end_time (timestamp Unix) du travail correspondant a
+    building_id, si trouve. Meme principe que decode_train_end_time mais
+    pour les batiments - contrairement aux troupes, aucune action de
+    'confirmation' n'existe pour les batiments : l'amelioration s'applique
+    automatiquement des que le minuteur arrive a zero, cote serveur."""
+    notice_body = find_message_of_type(response, 10029)
+    if notice_body is None:
+        return None
+
+    fields = walk_protobuf(notice_body)
+    for fn, wt, val in fields:
+        if fn == 1 and wt == "bytes":  # champ "queue" (BuildQueueInfo)
+            queue_fields = walk_protobuf(val)
+            for qfn, qwt, qval in queue_fields:
+                if qfn == 1 and qwt == "bytes":  # champ "works" (repeated BuildWorkInfo)
+                    work_fields = walk_protobuf(qval)
+                    work_building_id = None
+                    work_end_time = None
+                    for wfn, wwt, wval in work_fields:
+                        if wfn == 2:  # building_id
+                            work_building_id = wval
+                        elif wfn == 4:  # end_time
+                            work_end_time = wval
+                    if work_building_id == building_id and work_end_time:
+                        return work_end_time
+    return None
+
+
+def upgrade_building(sock, building_id, queue_index=0):
+    """Lance l'amelioration d'un batiment. Confirme par capture reseau
+    (kMsgCL2GSCityUpgradeBuidlingRequest). building_id est propre a ta
+    ville (meme ID que le batiment vu dans l'app - ex: la caserne
+    utilisee pour l'entrainement a le meme building_id que barrack_id).
+    queue_index=0 par defaut (premiere file de construction disponible;
+    certains comptes VIP ont plusieurs files simultanees).
+
+    Retourne le end_time (timestamp) si trouve dans la reponse, sinon None -
+    contrairement aux troupes, il n'y a pas d'action de 'recuperation'
+    separee : relance simplement upgrade_building() une fois le end_time
+    atteint pour le niveau suivant."""
+    print("\n=== ACTION : Amelioration du batiment #" + str(building_id) + " ===")
+    body = encode_field_varint(1, building_id) + encode_field_varint(2, queue_index)
+    packet = build_frame("3027", body)  # kMsgCL2GSCityUpgradeBuidlingRequest = 10032
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return None
+
+    end_time = decode_building_end_time(response, building_id)
+
+    reply_body = find_message_of_type(response, 10033)  # ...Reply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return end_time
+
+    fields = walk_protobuf(reply_body)
+    has_error = any(fn == 99 for fn, wt, val in fields)
+
+    if has_error:
+        error_code = next(val for fn, wt, val in fields if fn == 99)
+        print("Echec de l'amelioration, code erreur : " + str(error_code))
+    else:
+        log_event("Amelioration lancee : batiment #" + str(building_id))
+        if end_time:
+            remaining = end_time - int(time.time())
+            print("Fin de l'amelioration dans " + str(remaining) + " secondes " +
+                  "(timestamp " + str(end_time) + ").")
+
+    return end_time
+
+
+def parse_player_attributes(response):
+    """Cherche des messages PlayerAttribute (10009 - c'est le message qui
+    apparait tres frequemment dans le flux, pousse en continu par le
+    serveur) et retourne une liste de (type, value, action_type). Le
+    'type' suit la meme numerotation que CurrencyType. Ce message sert au
+    client a synchroniser en temps reel les totaux de ressources du
+    joueur (parmi d'autres attributs)."""
+    results = []
+    for msg_type, body in split_messages(response):
+        if msg_type != 10009:
+            continue
+        fields = walk_protobuf(body)
+        for fn, wt, val in fields:
+            if fn == 1 and wt == "bytes":
+                attr_fields = walk_protobuf(val)
+                atype = None
+                avalue = None
+                aaction = None
+                for afn, awt, aval in attr_fields:
+                    if afn == 1:
+                        atype = aval
+                    elif afn == 3:
+                        avalue = aval
+                    elif afn == 4:
+                        aaction = aval
+                if atype is not None and avalue is not None:
+                    results.append((atype, avalue, aaction))
+    return results
+
+
+class ResourceTracker:
+    """Garde en memoire les derniers totaux connus de chaque ressource, et
+    estime un taux de production par heure en observant l'evolution dans
+    le temps (le jeu ne semble pas transmettre de taux de production tout
+    fait - CollectInfo, qui devrait le donner via son champ 'speed',
+    revient vide sur ce compte, probablement a cause de la collecte
+    automatique des villageois). L'estimation se base sur l'historique
+    recent des valeurs observees, pas sur une donnee officielle du jeu -
+    a prendre comme approximation."""
+
+    def __init__(self, history_window_seconds=600):
+        self.history_window = history_window_seconds
+        self.history = {}  # type -> liste de (timestamp, value)
+        self.latest = {}   # type -> valeur la plus recente connue
+
+    def update(self, attributes):
+        now = time.time()
+        for atype, avalue, aaction in attributes:
+            self.latest[atype] = avalue
+            self.history.setdefault(atype, []).append((now, avalue))
+            cutoff = now - self.history_window
+            self.history[atype] = [(t, v) for t, v in self.history[atype] if t >= cutoff]
+
+    def estimated_rate_per_hour(self, atype):
+        points = self.history.get(atype, [])
+        if len(points) < 2:
+            return None
+        t_first, v_first = points[0]
+        t_last, v_last = points[-1]
+        elapsed_hours = (t_last - t_first) / 3600
+        if elapsed_hours <= 0:
+            return None
+        return (v_last - v_first) / elapsed_hours
+
+    def print_summary(self):
+        print("\n=== RESSOURCES ACTUELLES ===")
+        if not self.latest:
+            print("  Aucune donnee recue pour l'instant.")
+            return
+        for atype in sorted(self.latest):
+            name = CURRENCY_NAMES.get(atype, "Type " + str(atype))
+            value = self.latest[atype]
+            rate = self.estimated_rate_per_hour(atype)
+            line = "  " + name + " : " + str(value)
+            if rate is not None and abs(rate) >= 1:
+                sign = "+" if rate >= 0 else ""
+                line += "  (" + sign + str(int(rate)) + "/h estime)"
+            print(line)
+
+
 def heartbeat_loop(sock, interval_seconds=5):
+    """Envoie le vrai message de maintien de session (kMsgCL2GSKeepLiveRequest
+    = 10006, corps vide) confirme par capture reseau reelle. Les anciennes
+    valeurs utilisees ici (types 10145 EnterGameRequest et 13999
+    GetTotalChargeRequest) etaient incorrectes - ce ne sont pas des
+    keepalives mais de vraies actions ponctuelles, ce qui expliquait
+    probablement les coupures de connexion apres 1-2 minutes."""
     print("\n=== MAINTIEN DE SESSION (heartbeat, intervalle=" + str(interval_seconds) + "s) ===")
     print("Ctrl+C pour arreter.")
-    ping1 = bytes.fromhex("0400a127")
-    ping2 = bytes.fromhex("0400af36")
-    pings = [ping1, ping2]
-    i = 0
+    keepalive = bytes.fromhex("04001627")  # kMsgCL2GSKeepLiveRequest = 10006
     try:
         while True:
             time.sleep(interval_seconds)
-            ping = pings[i % 2]
-            i += 1
-            sock.sendall(ping)
+            sock.sendall(keepalive)
             response, total = recv_all(sock, drain_seconds=2)
-            print("Ping envoye, " + str(total) + " octets recus en reponse.")
+            reply = find_message_of_type(response, 10007)  # kMsgGS2CLKeepLiveReply
+            status = "OK" if reply is not None else ("(" + str(total) + " octets, type inattendu)" if total else "(rien)")
+            print("Keepalive envoye, reponse : " + status)
     except KeyboardInterrupt:
         print("\nArret demande.")
     except ConnectionResetError:

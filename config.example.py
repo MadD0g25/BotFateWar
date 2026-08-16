@@ -2,6 +2,8 @@
 # Configuration du bot Fate War
 # ============================================================================
 # Copie ce fichier vers "config.py" et renseigne tes propres valeurs.
+# NE JAMAIS commiter "config.py" sur un depot public (il contient tes
+# identifiants de compte) - il est deja liste dans .gitignore.
 #
 # Comment recuperer chaque valeur (voir README.md pour le detail complet
 # de la procedure) :

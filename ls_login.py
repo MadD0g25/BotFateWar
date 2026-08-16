@@ -1,4 +1,5 @@
 import socket
+import sys
 
 from fatewar_protocol import do_ls_login
 
@@ -8,6 +9,15 @@ from fatewar_protocol import do_ls_login
 # ============================================================================
 PI_HOST = "192.168.1.112"
 PI_PORT = 5555
+
+# Adresses possibles du Login Server. La premiere ("pss-login...") est celle
+# utilisee depuis le debut ; la seconde ("192-243-44-11...") vient du
+# fichier de config officiel de l'app (webconf.json) et sert peut-etre de
+# serveur par defaut/secours - utile si la premiere est rate-limitee.
+LS_SERVERS = {
+    "1": ("pss-login.pss.igotgames.net", 9310),
+    "2": ("192-243-44-11.ip.igotgames.net", 9310),
+}
 
 
 def send_to_pi(nonce, gs_host, gs_port):
@@ -28,7 +38,17 @@ def send_to_pi(nonce, gs_host, gs_port):
 
 
 def main():
-    login_session, gs_host, gs_port = do_ls_login()
+    choice = sys.argv[1] if len(sys.argv) > 1 else "1"
+    if choice not in LS_SERVERS:
+        print("Usage : python3 ls_login.py [1|2]")
+        print("  1 = pss-login.pss.igotgames.net (par defaut)")
+        print("  2 = 192-243-44-11.ip.igotgames.net (alternatif)")
+        return
+
+    ls_host, ls_port = LS_SERVERS[choice]
+    print("Utilisation du serveur LS #" + choice + " : " + ls_host + ":" + str(ls_port))
+
+    login_session, gs_host, gs_port = do_ls_login(ls_host, ls_port)
 
     if login_session is None:
         print("\nECHEC. Pas de login_session recupere.")
