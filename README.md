@@ -75,12 +75,6 @@ environ une seconde, ce qui évite tout risque d'expiration du nonce.
 
 Sur les **deux appareils**, place ces fichiers dans le même dossier :
 
-```bash
-git clone https://github.com/toncompte/fatewar-bot.git
-cd fatewar-bot
-cp config.example.py config.py
-```
-
 Puis édite `config.py` avec tes propres identifiants
 (voir [Configuration](#-configuration--récupérer-tes-identifiants) ci-dessous).
 
