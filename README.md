@@ -97,13 +97,7 @@ d'action, sans toucher au reste.
 Sur les **deux appareils**, place les fichiers nécessaires dans le même
 dossier (voir tableau ci-dessous pour savoir lesquels) :
 
-```bash
-git clone https://github.com/toncompte/fatewar-bot.git
-cd fatewar-bot
-cp config.example.py config.py
-```
-
-Puis édite `config.py` avec tes propres identifiants
+Edite `config.py` avec tes propres identifiants
 (voir [Configuration](#-configuration--récupérer-tes-identifiants) ci-dessous).
 
 Dans `ls_login.py`, renseigne l'IP locale de ton Raspberry Pi :
