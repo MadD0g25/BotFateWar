@@ -2,26 +2,34 @@ import socket
 import sys
 import time
 
-from fatewar_protocol import (
-    do_gs_login,
+from fatewar_core import log_event, load_state, save_state, recv_all, enable_full_debug_log
+from fatewar_login import do_gs_login
+from fatewar_actions_troops import (
+    train_troops,
+    claim_finished_training,
+    decode_train_end_time,
+)
+from fatewar_actions_building import upgrade_building, decode_building_end_time
+from fatewar_actions_rewards import (
     collect_privilege_escrow_reward,
     check_collectible_resources,
     collect_resource,
-    train_troops,
-    claim_finished_training,
     claim_daily_signin_reward,
     check_and_claim_completed_tasks,
     scan_and_claim_tasks_in_data,
     check_and_claim_mail,
-    decode_train_end_time,
-    decode_building_end_time,
-    upgrade_building,
+)
+from fatewar_resources import (
+    get_city_resources,
+    RESOURCE_TYPE_CODES,
     parse_player_attributes,
     ResourceTracker,
-    load_state,
-    save_state,
-    recv_all,
 )
+
+# Capture tout ce qui s'affiche a l'ecran (pas seulement les evenements
+# notables) dans fatewar_debug.log, avec horodatage par ligne. Utile pour
+# partager une trace complete de ce que fait le bot en cas de probleme.
+enable_full_debug_log()
 
 LISTEN_PORT = 5555
 
@@ -42,12 +50,17 @@ TRAINING_SLOTS = [
 AUTO_UPGRADE_BUILDING_ID = None
 # AUTO_UPGRADE_BUILDING_ID = 1009
 
+# Delais de reessai selon la raison de l'echec (secondes)
+RETRY_STILL_TRAINING = 60       # heure de fin inconnue, on retente prudemment
+RETRY_INSUFFICIENT_RES = 300    # pas assez de ressources, ca prend du temps a s'accumuler
+RETRY_GENERIC_ERROR = 60
+
 
 def persist(end_times, building_end_time):
     """Sauvegarde sur disque les timestamps de fin connus, pour que le bot
     puisse reprendre intelligemment s'il plante ou redemarre avant
     l'echeance - plutot que de repartir de zero sans savoir ou en etaient
-    les casernes (etat 'heure inconnue')."""
+    les casernes."""
     state = {}
     for bid, et in end_times.items():
         if et:
@@ -57,22 +70,55 @@ def persist(end_times, building_end_time):
     save_state(state)
 
 
-def try_claim_and_retrain(sock, slot, end_times, building_end_time):
-    """Tente de recuperer les troupes d'une caserne et relance un
-    entrainement si elle est libre. Met a jour end_times[barrack_id] et
-    persiste immediatement sur disque."""
-    barrack_id = slot["barrack_id"]
-    print("\nTentative de recuperation - caserne " + str(barrack_id) + "...")
-    if claim_finished_training(sock, barrack_id):
-        time.sleep(2)
-        end_times[barrack_id] = train_troops(
-            sock, barrack_id, slot["army_id"], slot["count"])
+def process_barrack(sock, slot, end_times, next_check, building_end_time):
+    """Logique complete pour une caserne :
+    1. Regarde d'abord si un entrainement est deja en cours (tentative de
+       recuperation - si ca echoue avec 'still_training', on sait qu'il
+       faut juste attendre).
+    2. Si la caserne est libre (recuperation reussie, ou rien a recuperer),
+       tente de lancer un nouvel entrainement.
+    3. Si le lancement echoue par manque de ressources, note-le et attend
+       plus longtemps avant de retenter (les ressources prennent du temps
+       a s'accumuler, contrairement a une simple attente de fin de
+       formation).
+    4. Si le lancement reussit, note l'heure de fin exacte."""
+    bid = slot["barrack_id"]
+    print("\n--- Caserne " + str(bid) + " ---")
+
+    claim_result = claim_finished_training(sock, bid)
+
+    if claim_result["still_training"]:
+        if claim_result["end_time"]:
+            # On connait le vrai temps restant (inclus dans la reponse du
+            # serveur) - pas besoin de retenter a l'aveugle toutes les 60s,
+            # on programme directement la prochaine tentative au bon moment.
+            end_times[bid] = claim_result["end_time"]
+            next_check.pop(bid, None)
+        else:
+            end_times[bid] = None
+            next_check[bid] = int(time.time()) + RETRY_STILL_TRAINING
+        persist(end_times, building_end_time)
+        return
+
+    time.sleep(1)
+    train_result = train_troops(sock, bid, slot["army_id"], slot["count"])
+
+    if train_result["status"] == "started":
+        end_times[bid] = train_result["end_time"]
+        next_check.pop(bid, None)
+    elif train_result["status"] == "insufficient_resources":
+        end_times[bid] = None
+        next_check[bid] = int(time.time()) + RETRY_INSUFFICIENT_RES
+        print("Nouvelle tentative dans " + str(RETRY_INSUFFICIENT_RES) +
+              "s (le temps d'accumuler des ressources).")
     else:
-        end_times[barrack_id] = int(time.time()) + 30
+        end_times[bid] = None
+        next_check[bid] = int(time.time()) + RETRY_GENERIC_ERROR
+
     persist(end_times, building_end_time)
 
 
-def smart_loop(sock, end_times, building_end_time):
+def smart_loop(sock, end_times, next_check, building_end_time):
     """Boucle principale : garde la session vivante (keepalive toutes les
     5s), surveille les notifications de fin d'entrainement (une par
     caserne active) ET de fin d'amelioration de batiment poussees
@@ -81,9 +127,6 @@ def smart_loop(sock, end_times, building_end_time):
     print("\n=== BOUCLE PRINCIPALE ===")
     print("Ctrl+C pour arreter.")
     keepalive = bytes.fromhex("04001627")  # kMsgCL2GSKeepLiveRequest = 10006
-    blind_retry_interval = 60
-    next_blind_retry = {slot["barrack_id"]: int(time.time()) + blind_retry_interval
-                         for slot in TRAINING_SLOTS}
     resources = ResourceTracker()
     next_resource_print = int(time.time()) + 120
 
@@ -94,8 +137,11 @@ def smart_loop(sock, end_times, building_end_time):
             remaining = et - int(time.time())
             print("Caserne " + str(bid) + " : pret dans ~" + str(max(0, remaining)) + "s.")
         else:
-            print("Caserne " + str(bid) + " : heure inconnue, nouvelle tentative " +
-                  "toutes les " + str(blind_retry_interval) + "s.")
+            nc = next_check.get(bid)
+            if nc:
+                remaining = nc - int(time.time())
+                print("Caserne " + str(bid) + " : prochaine verification dans ~" +
+                      str(max(0, remaining)) + "s.")
 
     if AUTO_UPGRADE_BUILDING_ID and building_end_time:
         remaining = building_end_time - int(time.time())
@@ -103,11 +149,17 @@ def smart_loop(sock, end_times, building_end_time):
               str(max(0, remaining)) + "s.")
 
     try:
+        keepalive_count = 0
         while True:
             time.sleep(5)
             sock.sendall(keepalive)
             response, total = recv_all(sock, drain_seconds=2)
-            print("Keepalive envoye (" + str(total) + " octets recus).")
+            keepalive_count += 1
+            # On n'affiche/logue qu'un keepalive sur 12 (~1 fois par minute)
+            # pour confirmer que la boucle tourne toujours, sans noyer le
+            # fichier de log avec une ligne toutes les 5 secondes.
+            if keepalive_count % 12 == 0:
+                print("Keepalive OK (" + str(keepalive_count) + " envoyes depuis le debut).")
 
             if total > 0:
                 state_changed = False
@@ -117,6 +169,7 @@ def smart_loop(sock, end_times, building_end_time):
                     new_end = decode_train_end_time(response, bid)
                     if new_end and new_end != end_times.get(bid):
                         end_times[bid] = new_end
+                        next_check.pop(bid, None)
                         state_changed = True
                         remaining = new_end - int(time.time())
                         print("Notification recue (caserne " + str(bid) +
@@ -145,17 +198,19 @@ def smart_loop(sock, end_times, building_end_time):
 
             if now >= next_resource_print:
                 resources.print_summary()
+                city_resources = get_city_resources(sock)
+                for type_code, value in city_resources.items():
+                    name = RESOURCE_TYPE_CODES.get(type_code, "Type " + str(type_code))
+                    log_event("Stock actuel - " + name + " : " + str(value))
                 next_resource_print = now + 120
 
             for slot in TRAINING_SLOTS:
                 bid = slot["barrack_id"]
                 et = end_times.get(bid)
-                should_try = (et and now >= et) or \
-                             (et is None and now >= next_blind_retry[bid])
+                nc = next_check.get(bid)
+                should_try = (et and now >= et) or (nc and now >= nc)
                 if should_try:
-                    try_claim_and_retrain(sock, slot, end_times, building_end_time)
-                    if end_times.get(bid) is None:
-                        next_blind_retry[bid] = int(time.time()) + blind_retry_interval
+                    process_barrack(sock, slot, end_times, next_check, building_end_time)
                     time.sleep(1)
 
             if AUTO_UPGRADE_BUILDING_ID and building_end_time and now >= building_end_time:
@@ -185,9 +240,6 @@ def run_bot(gs_host, gs_port, nonce):
         print("\nImpossible d'ouvrir la session GS.")
         return
 
-    # Chargement de l'etat sauvegarde lors d'une precedente execution -
-    # permet de reprendre sans repartir de zero si le bot a plante ou a
-    # ete redemarre avant qu'un entrainement/amelioration ne se termine.
     saved_state = load_state()
     if saved_state:
         print("\nEtat precedent trouve (" + str(len(saved_state)) + " entree(s)),")
@@ -196,8 +248,6 @@ def run_bot(gs_host, gs_port, nonce):
     keepalive = bytes.fromhex("04001627")  # kMsgCL2GSKeepLiveRequest = 10006
 
     def ping():
-        """Envoie un keepalive rapide pour eviter que la session n'expire
-        pendant la longue sequence d'actions de demarrage."""
         sock.sendall(keepalive)
         recv_all(sock, drain_seconds=1)
 
@@ -212,39 +262,24 @@ def run_bot(gs_host, gs_port, nonce):
             collect_resource(sock, info["type"])
     ping()
 
-    # Recuperation + relance pour chaque caserne suivie. Si la recuperation
-    # echoue (caserne encore occupee) et qu'on a un timestamp sauvegarde
-    # d'une session precedente pour cette caserne, on le reutilise au lieu
-    # de marquer l'heure comme inconnue.
     end_times = {}
+    next_check = {}
+    now = int(time.time())
     building_end_time = saved_state.get(
         "building:" + str(AUTO_UPGRADE_BUILDING_ID)) if AUTO_UPGRADE_BUILDING_ID else None
 
     for slot in TRAINING_SLOTS:
-        time.sleep(1)
         bid = slot["barrack_id"]
-        print("\n--- Caserne " + str(bid) + " ---")
-        ready = claim_finished_training(sock, bid)
+        saved_et = saved_state.get("barrack:" + str(bid))
+        if saved_et and saved_et > now:
+            print("\n--- Caserne " + str(bid) + " : timestamp sauvegarde encore valide ---")
+            end_times[bid] = saved_et
+            continue
         time.sleep(1)
-        if ready:
-            end_times[bid] = train_troops(sock, bid, slot["army_id"], slot["count"])
-        else:
-            saved_et = saved_state.get("barrack:" + str(bid))
-            if saved_et:
-                print("Caserne occupee - reprise du timestamp sauvegarde (" +
-                      str(saved_et) + ").")
-                end_times[bid] = saved_et
-            else:
-                print("Caserne occupee - la boucle principale reessaiera plus tard.")
-                end_times[bid] = None
+        process_barrack(sock, slot, end_times, next_check, building_end_time)
         ping()
 
     persist(end_times, building_end_time)
-
-    # Recompense de connexion quotidienne : desactivee pour l'instant, pas
-    # encore confirmee fonctionnelle - voir fatewar_protocol.py.
-    # time.sleep(1)
-    # claim_daily_signin_reward(sock, day=1)
 
     time.sleep(1)
     check_and_claim_completed_tasks(sock)
@@ -254,12 +289,18 @@ def run_bot(gs_host, gs_port, nonce):
     check_and_claim_mail(sock)
     ping()
 
+    # Recuperation des totaux de ressources actuels (bois/nourriture/
+    # connaissances confirmes ; voir fatewar_resources.py).
+    time.sleep(1)
+    get_city_resources(sock)
+    ping()
+
     if AUTO_UPGRADE_BUILDING_ID and not building_end_time:
         time.sleep(1)
         building_end_time = upgrade_building(sock, AUTO_UPGRADE_BUILDING_ID)
         persist(end_times, building_end_time)
 
-    smart_loop(sock, end_times, building_end_time)
+    smart_loop(sock, end_times, next_check, building_end_time)
 
 
 def main():

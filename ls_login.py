@@ -1,7 +1,7 @@
 import socket
 import sys
 
-from fatewar_protocol import do_ls_login
+from fatewar_login import do_ls_login
 
 # ============================================================================
 # A ADAPTER : IP locale de ton Raspberry Pi (verifiable avec "hostname -I"

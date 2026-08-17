@@ -17,6 +17,7 @@
 
 - [Avertissements importants](#-avertissements-importants)
 - [Comment ça marche](#-comment-ça-marche)
+- [Structure du projet](#-structure-du-projet)
 - [Installation](#-installation)
 - [Utilisation](#-utilisation)
 - [Configuration : récupérer tes identifiants](#-configuration--récupérer-tes-identifiants)
@@ -24,7 +25,7 @@
 - [Reprise après plantage](#-reprise-après-plantage)
 - [Capturer tes propres casernes et bâtiments](#-capturer-tes-propres-casernes-et-bâtiments)
 - [Ce qui manque](#-ce-qui-manque--contributions-bienvenues)
-- [Journal et etat persistant](#-journal-et-etat-persistant)
+- [Journal et état persistant](#-journal-et-état-persistant)
 - [Renouvellement des identifiants](#-renouvellement-des-identifiants)
 - [Structure du protocole](#-structure-du-protocole)
 - [Contribuer](#-contribuer)
@@ -52,17 +53,15 @@ la première nécessite un appareil Apple ; la seconde peut tourner
 **indéfiniment** sur n'importe quelle machine (Raspberry Pi, PC Linux, Mac).
 
 ```
-┌─────────────────────┐        nonce         ┌──────────────────────────────┐
-│   📱 iPhone           │  ──────────────────▶ │   🖥️  Raspberry Pi / Linux    │
-│   (a-Shell)           │      (réseau,         │                                │
-│                        │       ~1 seconde)     │                                │
-│   ls_login.py          │                       │   gs_bot.py                   │
-│   → login Login Server │                       │   → login Game Server         │
-│   → récupère le nonce  │                       │   → synchronisation           │
-│   → l'envoie au Pi     │                       │   → actions de jeu            │
-│                        │                       │   → boucle infinie autonome   │
-└─────────────────────┘                       │      (survit aux plantages)    │
-                                                └──────────────────────────────┘
+ 📱 iPhone (a-Shell)                    🖥️  Raspberry Pi / Linux
+┌─────────────────────┐    nonce      ┌──────────────────────────────┐
+│   ls_login.py         │ ─(réseau,──▶ │   gs_bot.py                    │
+│  → login Login Server │  ~1 seconde) │  → login Game Server           │
+│  → récupère le nonce  │              │  → synchronisation             │
+│  → l'envoie au Pi     │              │  → actions de jeu              │
+└─────────────────────┘              │  → boucle infinie autonome     │
+                                       │     (survit aux plantages)     │
+                                       └──────────────────────────────┘
 ```
 
 `ls_login.py` se connecte au Login Server, récupère un nonce de session,
@@ -70,14 +69,39 @@ puis l'envoie **automatiquement** par le réseau à `gs_bot.py` qui tourne en
 écoute sur l'autre appareil. Pas de copie manuelle : le transfert prend
 environ une seconde, ce qui évite tout risque d'expiration du nonce.
 
-Deux serveurs Login Server sont disponibles (voir `LS_SERVERS` dans
-`ls_login.py`) en cas de limitation de fréquence sur le premier.
+---
+
+## 📦 Structure du projet
+
+Le code est découpé en modules, chacun avec une responsabilité claire :
+
+| Fichier | Rôle |
+|---|---|
+| `fatewar_core.py` | Encodage/décodage Protobuf bas niveau, journal, état persistant |
+| `fatewar_login.py` | Connexion Login Server + Game Server, maintien de session |
+| `fatewar_actions_troops.py` | Entraînement et récupération de troupes |
+| `fatewar_actions_building.py` | Amélioration de bâtiments |
+| `fatewar_actions_rewards.py` | Gains hors ligne, tâches/quêtes, courrier, sign-in quotidien |
+| `fatewar_resources.py` | Suivi des totaux de ressources en temps réel |
+| `gs_bot.py` | **Script principal (Pi)** — orchestre tous les modules ci-dessus |
+| `ls_login.py` | **Script iPhone** — login initial uniquement |
+
+Cette séparation facilite la contribution : pour ajouter une nouvelle
+action de jeu, il suffit généralement de créer ou éditer un seul module
+d'action, sans toucher au reste.
 
 ---
 
 ## 📦 Installation
 
-Sur les **deux appareils**, place ces fichiers dans le même dossier :
+Sur les **deux appareils**, place les fichiers nécessaires dans le même
+dossier (voir tableau ci-dessous pour savoir lesquels) :
+
+```bash
+git clone https://github.com/toncompte/fatewar-bot.git
+cd fatewar-bot
+cp config.example.py config.py
+```
 
 Puis édite `config.py` avec tes propres identifiants
 (voir [Configuration](#-configuration--récupérer-tes-identifiants) ci-dessous).
@@ -94,9 +118,17 @@ PI_PORT = 5555               # peut rester par defaut
 | Fichier | iPhone (a-Shell) | Pi / Linux |
 |---|:---:|:---:|
 | `config.py` | ✅ | ✅ |
-| `fatewar_protocol.py` | ✅ | ✅ |
+| `fatewar_core.py` | ✅ | ✅ |
+| `fatewar_login.py` | ✅ | ✅ |
+| `fatewar_actions_troops.py` | ❌ | ✅ |
+| `fatewar_actions_building.py` | ❌ | ✅ |
+| `fatewar_actions_rewards.py` | ❌ | ✅ |
+| `fatewar_resources.py` | ❌ | ✅ |
 | `ls_login.py` | ✅ | ❌ |
 | `gs_bot.py` | ❌ | ✅ |
+
+L'iPhone n'a besoin que du strict minimum pour le login (léger, rapide à
+transférer) ; le Pi a besoin de tous les modules d'action.
 
 ---
 
@@ -127,7 +159,7 @@ continue seul, en boucle, potentiellement pendant des jours (voir
 **Pour lancer une nouvelle session** (la connexion GS finit par expirer
 après un certain temps), relance simplement `gs_bot.py` sur le Pi puis
 `ls_login.py` sur l'iPhone. L'état de tes casernes/bâtiments est conservé
-automatiquement (voir ci-dessous).
+automatiquement.
 
 ---
 
@@ -192,20 +224,19 @@ cp config.example.py config.py
 
 ## ✨ Fonctionnalités
 
-| Action | Statut | Détail |
-|---|:---:|---|
-| **Login complet** (LS + GS) | ✅ Stable | Architecture à deux appareils, serveur LS de secours disponible |
-| **Maintien de session** | ✅ Stable | Keepalive natif du jeu (`KeepLiveRequest`), toutes les 5s |
-| **Gains hors ligne** (`PrivilegeEscrow`) | ✅ Stable | Collecte automatique |
-| **Ressources de production** (`CollectInfo`/`CollectResource`) | ✅ Stable | Vérifie et collecte (souvent vide si collecte auto activée côté jeu) |
-| **Entraînement de troupes multi-casernes** (`Train`) | ✅ Stable | Plusieurs casernes en parallèle, chacune avec son propre minuteur |
-| **Récupération automatique des troupes** (`DealArmy`) | ✅ Stable | Équivalent au clic manuel, avec minuteur basé sur le vrai `end_time` |
-| **Amélioration de bâtiment** (`CityUpgradeBuilding`) | ✅ Stable | Désactivée par défaut, cycle automatique avec minuteur si activée |
-| **Tâches/quêtes terminées** (`TaskPeriod`) | ✅ Stable | Écoute en continu pendant toute la durée du bot, pas juste au démarrage |
-| **Courrier avec pièces jointes** (`Mail`) | ✅ Stable | Détection et réclamation automatique |
-| **Suivi des ressources en temps réel** (`PlayerAttribute`) | ✅ Stable | Totaux actuels + taux de production estimé, affichés périodiquement |
-| **Reprise après plantage** | ✅ Stable | État sauvegardé sur disque, voir section dédiée |
-| **Sign-in quotidien** (`SignInReward`) | ❌ Désactivé | Pas encore confirmé fonctionnel — voir [Ce qui manque](#-ce-qui-manque--contributions-bienvenues) |
+| Action | Statut | Module | Détail |
+|---|:---:|---|---|
+| **Login complet** (LS + GS) | ✅ Stable | `fatewar_login.py` | Architecture à deux appareils, serveur LS de secours |
+| **Maintien de session** | ✅ Stable | `fatewar_login.py` | Keepalive natif du jeu, toutes les 5s |
+| **Gains hors ligne** | ⚠️ Incertain | `fatewar_actions_rewards.py` | Renvoie souvent vide ; les gains affichés en jeu semblent calculés côté client, pas toujours confirmés côté serveur au moment du clic — voir [Ce qui manque](#-ce-qui-manque--contributions-bienvenues) |
+| **Entraînement multi-casernes** | ✅ Stable | `fatewar_actions_troops.py` | Plusieurs casernes en parallèle, minuteur propre à chacune |
+| **Récupération de troupes** | ✅ Stable | `fatewar_actions_troops.py` | Équivalent au clic manuel, minuteur basé sur le vrai `end_time` |
+| **Amélioration de bâtiment** | ✅ Stable | `fatewar_actions_building.py` | Désactivée par défaut, cycle automatique si activée |
+| **Tâches/quêtes** | ✅ Stable | `fatewar_actions_rewards.py` | Écoute en continu, pas juste au démarrage |
+| **Courrier** | ✅ Stable | `fatewar_actions_rewards.py` | Détection et réclamation automatique |
+| **Totaux de ressources** | ✅ Stable | `fatewar_resources.py` | Bois/nourriture/connaissances confirmés via `CityInfoReply` |
+| **Reprise après plantage** | ✅ Stable | `fatewar_core.py` | État sauvegardé sur disque |
+| **Sign-in quotidien** | ❌ Désactivé | `fatewar_actions_rewards.py` | Pas encore confirmé fonctionnel |
 
 ---
 
@@ -217,29 +248,26 @@ l'amélioration de bâtiment en cours, à chaque mise à jour.
 
 Si le bot plante ou est redémarré avant qu'un entraînement ne se termine,
 il charge cet état au démarrage et reprend directement avec l'heure
-connue au lieu de repartir de zéro (mode "heure inconnue", qui retente
-seulement toutes les 60 secondes en aveugle).
+connue au lieu de repartir de zéro.
 
 ---
 
 ## 🏰 Capturer tes propres casernes et bâtiments
 
-Les valeurs par défaut dans `gs_bot.py` (`TRAINING_SLOTS`, `AUTO_UPGRADE_BUILDING_ID`)
-correspondent au compte utilisé pour développer ce bot — **elles ne
-fonctionneront pas pour toi**. Pour trouver les tiennes :
+Les valeurs par défaut dans `gs_bot.py` (`TRAINING_SLOTS`,
+`AUTO_UPGRADE_BUILDING_ID`) correspondent au compte utilisé pour développer
+ce bot — **elles ne fonctionneront pas pour toi**.
 
 ### Casernes (`TRAINING_SLOTS`)
 
 1. Capture le trafic TCP brut vers le Game Server (port 12040 ou 12042)
-   pendant que tu lances un entrainement de troupe manuellement dans l'app
-   (`tcpdump` ou équivalent), une fois par type de troupe.
-2. Cherche dans le flux client→serveur le message de type `10402`
-   (`kMsgCL2GSTrainRequest`, octets `a2 28` en little-endian juste après le
-   préfixe de longueur).
-3. Le corps du message contient un sous-champ `army` (`army_id` + `count`)
-   et un champ `barrack_id` séparé.
-4. Répète pour chaque caserne, puis mets à jour `TRAINING_SLOTS` dans
-   `gs_bot.py` :
+   pendant que tu lances un entrainement de troupe manuellement dans l'app,
+   une fois par type de troupe.
+2. Cherche le message de type `10402` (`kMsgCL2GSTrainRequest`, octets
+   `a2 28` après le préfixe de longueur).
+3. Le corps contient un sous-champ `army` (`army_id` + `count`) et un champ
+   `barrack_id` séparé.
+4. Mets à jour `TRAINING_SLOTS` dans `gs_bot.py` :
    ```python
    TRAINING_SLOTS = [
        {"barrack_id": TON_ID, "army_id": TON_ARMY_ID, "count": 100},
@@ -247,60 +275,65 @@ fonctionneront pas pour toi**. Pour trouver les tiennes :
    ]
    ```
 
-> 💡 `army_id` provient d'une table de configuration globale du jeu
-> (`TroopCfgData`) — probablement identique pour tous les joueurs ayant le
-> même type de troupe débloqué. `barrack_id`, en revanche, est unique à ta
-> ville.
+> 💡 `army_id` provient d'une table de configuration globale du jeu —
+> probablement identique pour tous les joueurs ayant le même type de
+> troupe débloqué. `barrack_id`, en revanche, est unique à ta ville.
 
 ### Amélioration de bâtiment (`AUTO_UPGRADE_BUILDING_ID`)
 
-Désactivée par défaut. Même méthode : capture le trafic pendant que tu
-améliores un bâtiment manuellement, cherche le type `10032`
+Désactivée par défaut. Même méthode : cherche le type `10032`
 (`kMsgCL2GSCityUpgradeBuidlingRequest`, octets `30 27`) — le corps contient
-directement `building_id` (champ 1) et `queue_index` (champ 2, généralement
-0). Renseigne la valeur trouvée dans `gs_bot.py` :
+directement `building_id` et `queue_index`.
 
 ```python
 AUTO_UPGRADE_BUILDING_ID = TON_BUILDING_ID
 ```
 
-> ⚠️ À utiliser avec précaution : le bot tentera l'amélioration sans
-> vérifier si tu as les ressources nécessaires — en cas de ressources
-> insuffisantes, le serveur renverra simplement une erreur (pas de risque
-> de perte), mais ça reste une action "aveugle".
+> ⚠️ Le bot tentera l'amélioration sans vérifier les ressources
+> disponibles — en cas de ressources insuffisantes, le serveur renvoie
+> une erreur (pas de risque de perte), mais reste une action "aveugle".
 
 ---
 
 ## 🚧 Ce qui manque (contributions bienvenues)
 
-Le jeu comporte des **milliers** de types de messages. Voici ce qui reste à
-faire, avec la même méthode que le reste du projet (chercher la classe dans
-un dump IL2Cpp, décoder les champs, tester par capture réseau) :
+Le jeu comporte des **milliers** de types de messages. Voici ce qui reste
+à faire, avec la même méthode que le reste du projet :
 
+- [ ] Comprendre pourquoi les gains hors ligne (`PrivilegeEscrow`)
+      renvoient systématiquement vide côté réseau, alors que l'app affiche
+      des valeurs non-nulles au clic — plusieurs captures réseau réelles
+      n'ont montré aucune trace de ces valeurs, laissant penser qu'elles
+      sont calculées côté client plutôt que transmises par le serveur
 - [ ] Débugger le sign-in quotidien (activité peut-être inactive, ou
       mauvais numéro de jour)
 - [ ] Construction de nouveaux bâtiments (`CityCreateBuildingRequest`,
-      déjà repéré mais pas implémenté)
+      repéré mais pas implémenté)
 - [ ] Utilisation d'objets d'inventaire (`ItemUseRequest`, repéré mais pas
-      implémenté par précaution — risque de gaspiller des objets rares
-      sans supervision)
-- [ ] Enveloppes cadeaux de chat (`HongbaoListRequest`, repéré, nécessite
-      un `room_id`/`channel` de salon de discussion)
+      implémenté par précaution)
+- [ ] Aide de guilde (`GuildAssistList`/`GuildAssist`) — souvent une
+      source de récompenses gratuites dans ce genre de jeu
+- [ ] Enveloppes cadeaux de chat (`HongbaoListRequest`, nécessite un
+      `room_id`/`channel` de salon)
 - [ ] Marches de troupes (attaque, récolte sur la carte du monde)
-- [ ] Alliance (aide aux membres, dons, événements de guilde)
+- [ ] Autres fonctionnalités de guilde (bâtiments, enchères, calendrier,
+      points de récolte partagés — tous repérés dans le trafic réseau
+      mais pas encore décodés)
 
 ---
 
-## 📝 Journal et etat persistant
+## 📝 Journal et état persistant
 
 - **`fatewar_bot.log`** : chaque collecte réussie (gains hors ligne,
   ressources, entraînements, tâches, courrier) est enregistrée avec
   horodatage.
+- **`fatewar_debug.log`** : capture complète et horodatée de tout ce que
+  le bot affiche, utile pour partager une trace en cas de problème.
 - **`fatewar_state.json`** : timestamps de fin connus par caserne/bâtiment,
-  pour la reprise après plantage (voir section dédiée plus haut).
+  pour la reprise après plantage.
 
-Ces deux fichiers sont créés automatiquement à côté des scripts et exclus
-du dépôt Git (`.gitignore`).
+Ces fichiers sont créés automatiquement à côté des scripts et exclus du
+dépôt Git (`.gitignore`).
 
 ---
 
@@ -309,9 +342,9 @@ du dépôt Git (`.gitignore`).
 Le `WEB_SESSION` (JWT) reste valide plusieurs jours mais finira par
 expirer. Si `ls_login.py` échoue avec *"connexion réinitialisée"* de façon
 persistante (même après avoir essayé le serveur LS alternatif et attendu
-un peu, au cas où ce serait un rate-limit), refais une capture réseau
-(étapes 1-2 de la [Configuration](#-configuration--récupérer-tes-identifiants))
-pour en récupérer un frais.
+un peu), refais une capture réseau (étapes 1-2 de la
+[Configuration](#-configuration--récupérer-tes-identifiants)) pour en
+récupérer un frais.
 
 ---
 
@@ -327,10 +360,11 @@ Protobuf binaire sur TCP brut, framing simple :
 └──────────────────┴──────────────────┴─────────────────┘
 ```
 
-Plusieurs messages peuvent arriver concaténés dans un seul paquet TCP (le
-message attendu + des notifications périodiques non sollicitées) — le
-parsing doit toujours découper chaque message selon sa propre longueur
-plutôt que de supposer qu'un seul message est présent.
+Plusieurs messages peuvent arriver concaténés dans un seul paquet TCP.
+Les réponses volumineuses (comme `CityInfoReply`) peuvent en plus être
+compressées en zlib et emballées dans un `CompressedMessage` générique
+(type 14028) — `find_message_of_type()` dans `fatewar_core.py` gère cette
+décompression automatiquement pour tous les modules.
 
 Les types de message et structures de champs ont été extraits par
 décompilation IL2Cpp du client officiel (`global-metadata.dat` +
@@ -340,20 +374,20 @@ décompilation IL2Cpp du client officiel (`global-metadata.dat` +
 
 ## 🤝 Contribuer
 
-Toute contribution pour décoder de nouvelles actions est bienvenue ! Voir
-`fatewar_protocol.py` pour des exemples complets de décodage (structure
-claire : `encode_field_varint`, `encode_field_string`, `walk_protobuf`,
-`find_message_of_type`, `find_all_messages_of_type`).
+Toute contribution pour décoder de nouvelles actions est bienvenue !
+Chaque module d'action suit le même style — voir `fatewar_actions_troops.py`
+pour un exemple complet avec suivi de minuteur, ou
+`fatewar_actions_rewards.py::check_and_claim_mail` pour un exemple de
+liste + réclamation groupée.
 
 **Process type pour ajouter une action :**
 1. Trouve le nom du message dans un dump IL2Cpp (`kMsgCL2GS...Request`)
 2. Note sa valeur numérique, convertis en hex little-endian
 3. Trouve la classe correspondante pour connaître ses champs
 4. Capture une vraie requête/réponse par `tcpdump` pour valider
-5. Ajoute la fonction dans `fatewar_protocol.py`, en suivant le style
-   existant (voir `train_troops`/`upgrade_building` pour des exemples avec
-   suivi de minuteur, ou `check_and_claim_mail` pour un exemple de liste +
-   réclamation groupée)
+5. Ajoute la fonction dans le module d'action approprié (ou crée-en un
+   nouveau si la fonctionnalité ne correspond à aucun module existant),
+   en important les utilitaires nécessaires depuis `fatewar_core.py`
 
 ---
 
