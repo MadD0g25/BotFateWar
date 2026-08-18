@@ -7,8 +7,8 @@ from fatewar_core import (
 )
 
 CURRENCY_NAMES = {
-    1: "Emoney", 2: "Oil", 3: "Nourriture (Food)", 4: "Bois (Wood)",
-    5: "Acier/Pierre (Steel)", 16: "Gold", 17: "TechnologyPoint",
+    1: "Emoney", 2: "Pierre (Stone)", 3: "Nourriture (Food)", 4: "Bois (Wood)",
+    5: "Fer (Iron/Steel)", 16: "Gold", 17: "TechnologyPoint",
 }
 
 
@@ -374,3 +374,313 @@ def check_and_claim_mail(sock):
 
     if not has_error:
         print("Courrier reclame avec succes (" + str(len(unclaimed_ids)) + " mail(s)) !")
+
+
+# ============================================================================
+# Ressources de guilde (contribution des membres)
+# ============================================================================
+
+def check_and_collect_guild_resource(sock):
+    """Verifie puis collecte les ressources de guilde disponibles pour le
+    joueur (contribution personnelle accumulee via la guilde). Les deux
+    requetes sont vides (aucun champ necessaire) - confirme via dump.cs."""
+    print("\n=== ACTION : Ressources de guilde ===")
+    packet = build_frame("9329", b"")  # kMsgCL2GSGuildCollectPlayerGuildResourceRequest = 10643
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 10644)  # ...Reply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = False
+    collected_any = False
+    for fn, wt, val in fields:
+        if fn == 99:
+            has_error = True
+            print("Erreur, code : " + str(val))
+        elif fn == 1 and wt == "bytes":
+            # Structure particuliere pour cette action : le champ "res_type"
+            # (sous-champ 1) vaut toujours 1 ici (pas le vrai identifiant de
+            # ressource comme dans les autres messages du jeu) - le vrai
+            # type de ressource est dans le champ "sub_type" (sous-champ 2),
+            # confirme par capture reelle (bois/nourriture recus mais tous
+            # affiches comme "Emoney" avant ce correctif).
+            res_fields = walk_protobuf(val)
+            res = {}
+            for rfn, rwt, rval in res_fields:
+                if rfn == 2:
+                    res["res_type"] = rval  # sub_type = le vrai type ici
+                elif rfn == 3:
+                    res["value"] = rval
+            if res:
+                res_name = CURRENCY_NAMES.get(res.get("res_type"), "Type " + str(res.get("res_type")))
+                log_event("Ressource de guilde : +" + str(res.get("value", 0)) + " " + res_name)
+                collected_any = True
+
+    if has_error:
+        print("Echec de la collecte des ressources de guilde.")
+    elif not collected_any:
+        print("Rien a collecter cote guilde pour l'instant.")
+    else:
+        print("Ressources de guilde collectees !")
+
+
+def help_guild_members(sock):
+    """Aide tous les membres de guilde ayant une demande d'assistance en
+    attente (equivalent au bouton 'aider tout le monde' de l'app). Requete
+    vide, aucun parametre necessaire - confirme via dump.cs
+    (kMsgCL2GSGuildAssistHelpOtherRequest)."""
+    print("\n=== ACTION : Aide aux membres de guilde ===")
+    packet = build_frame("e228", b"")  # kMsgCL2GSGuildAssistHelpOtherRequest = 10466
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 10467)  # ...Reply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = False
+    assist_count = 0
+    contribution = 0
+    for fn, wt, val in fields:
+        if fn == 99:
+            has_error = True
+            print("Erreur, code : " + str(val))
+        elif fn == 1 and wt == "varint":
+            assist_count = val
+        elif fn == 2 and wt == "varint":
+            contribution = val
+
+    if has_error:
+        print("Echec de l'aide aux membres.")
+    elif assist_count == 0:
+        print("Personne a aider pour l'instant.")
+    else:
+        log_event(str(assist_count) + " membre(s) de guilde aide(s), " +
+                   "+" + str(contribution) + " points de contribution.")
+
+
+# ============================================================================
+# Don a la recherche de guilde (GuildTechDonate). Confirme par capture
+# reseau reelle : le vrai client l'envoie en rafale (32 fois en quelques
+# secondes) pour le meme tech_id/level - clairement concu pour etre
+# "spamme" par le joueur, action peu couteuse par appel.
+# ============================================================================
+
+def donate_guild_tech(sock, tech_id, level=1, use_gem=False, times=1):
+    """Fait un (ou plusieurs) don(s) a la recherche de guilde en cours.
+
+    IMPORTANT : tech_id correspond a la recherche ACTUELLEMENT active pour
+    ta guilde - ce n'est pas une valeur fixe, elle change avec le temps a
+    mesure que la guilde progresse. Il faut la mettre a jour manuellement
+    de temps en temps (capture reseau, ou observation en jeu) - contexte
+    trouve par capture reelle : tech_id=21003, level=1."""
+    print("\n=== ACTION : Don a la recherche de guilde (tech=" + str(tech_id) +
+          ", " + str(times) + " fois) ===")
+    body = (encode_field_varint(1, tech_id) + encode_field_varint(2, level) +
+            encode_field_varint(3, 1 if use_gem else 0))
+    packet = build_frame("9f29", body)  # kMsgCL2GSGuildTechDonateRequest = 10655
+
+    success_count = 0
+    for _ in range(times):
+        sock.sendall(packet)
+        response, total = recv_all(sock, drain_seconds=2)
+        if total == 0:
+            break
+        reply_body = find_message_of_type(response, 10656)  # ...Reply
+        if reply_body is None:
+            break
+        fields = walk_protobuf(reply_body)
+        has_error = any(fn == 99 for fn, wt, val in fields)
+        if has_error:
+            break
+        success_count += 1
+
+    if success_count > 0:
+        log_event("Don a la recherche de guilde : " + str(success_count) +
+                   "/" + str(times) + " reussi(s) (tech " + str(tech_id) + ").")
+    else:
+        print("Aucun don reussi (recherche peut-etre terminee, ou plus de ressources).")
+
+    return success_count
+
+
+# ============================================================================
+# Collecte citoyenne (CitizenCollectSettle) - correspond a l'ecran "Details
+# fiscaux" vu dans l'app. Confirme par capture reseau reelle : collect_id
+# semble identifier un "citoyen"/source de collecte specifique, qui genere
+# des ressources en continu et se recolte periodiquement.
+# ============================================================================
+
+def collect_citizen_settle(sock, collect_id):
+    """Collecte les gains accumules pour un citoyen/une source fiscale
+    donnee. collect_id est propre a ton compte (par ex. 10004 observe en
+    capture reelle, revenant regulierement toutes les quelques minutes -
+    semble etre une source fixe/permanente, contrairement a d'autres
+    collect_id vus une seule fois qui pourraient etre ponctuels)."""
+    print("\n=== ACTION : Collecte citoyenne (collect_id=" + str(collect_id) + ") ===")
+    body = encode_field_varint(1, collect_id)
+    packet = build_frame("3c30", body)  # kMsgCL2GSCitizenCollectSettleRequest = 12348
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 12349)  # ...Reply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = False
+    collected_any = False
+    for fn, wt, val in fields:
+        if fn == 99:
+            has_error = True
+            print("Erreur, code : " + str(val))
+        elif fn == 3 and wt == "bytes":  # champ "award" (ResourceSet)
+            resources = decode_resource_set(val)
+            for r in resources:
+                res_name = CURRENCY_NAMES.get(r.get("res_type"), "Type " + str(r.get("res_type")))
+                log_event("Collecte citoyenne (id " + str(collect_id) + ") : +" +
+                           str(r.get("value", 0)) + " " + res_name)
+                collected_any = True
+
+    if has_error:
+        print("Echec de la collecte citoyenne.")
+    elif not collected_any:
+        print("Rien a collecter pour cette source pour l'instant.")
+    else:
+        print("Collecte citoyenne reussie !")
+
+
+# ============================================================================
+# Cadeaux de guilde (reclamation groupee) et cadeaux de calendrier mensuel
+# (reclamation groupee egalement) - deux "boutons tout reclamer" simples,
+# aucun parametre necessaire, confirmes via dump.cs.
+# ============================================================================
+
+def claim_all_guild_gifts(sock):
+    """Reclame tous les cadeaux de guilde disponibles en une fois
+    (kMsgCL2GSGuildGiftClaimAllRequest, corps vide)."""
+    print("\n=== ACTION : Reclamation de tous les cadeaux de guilde ===")
+    packet = build_frame("8629", b"")  # kMsgCL2GSGuildGiftClaimAllRequest = 10630
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 10631)  # ...Reply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = any(fn == 99 for fn, wt, val in fields)
+    if has_error:
+        error_code = next(val for fn, wt, val in fields if fn == 99)
+        if error_code == 1353:  # kECGuildNoGiftToClaim
+            print("Aucun cadeau de guilde disponible pour l'instant.")
+        else:
+            print("Echec, code erreur : " + str(error_code))
+    else:
+        log_event("Cadeaux de guilde reclames (tous).")
+
+
+def claim_all_daily_gifts(sock):
+    """Reclame tous les cadeaux de selection quotidienne du mall en une
+    fois (kMsgCL2GSMallGetAllDaysSelectOpitonGiftRequest, corps vide)."""
+    print("\n=== ACTION : Reclamation de tous les cadeaux quotidiens (mall) ===")
+    packet = build_frame("d934", b"")  # ...Request = 13529
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 13530)  # ...Reply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = any(fn == 99 for fn, wt, val in fields)
+    if has_error:
+        error_code = next(val for fn, wt, val in fields if fn == 99)
+        print("Echec, code erreur : " + str(error_code))
+    else:
+        log_event("Cadeaux quotidiens (mall) reclames.")
+
+
+# ============================================================================
+# Recolte de ferme (systeme de mini-jeu separe : farmInfo/farmLivestock/
+# farmHarvest). Confirme par capture reseau reelle.
+# ============================================================================
+
+def harvest_farm(sock, pen_id):
+    """Recolte un enclos de ferme donne. pen_id est propre a ton compte -
+    trouve par capture reseau (kMsgCL2GSFarmHarvestRequest)."""
+    print("\n=== ACTION : Recolte de ferme (enclos " + str(pen_id) + ") ===")
+    body = encode_field_varint(1, pen_id)
+    packet = build_frame("5b33", body)  # kMsgCL2GSFarmHarvestRequest = 13147
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=3)
+    print("Reponse brute : " + response.hex())
+
+    if total == 0:
+        print("Aucune reponse.")
+        return
+
+    reply_body = find_message_of_type(response, 13167)  # kMsgGS2CLFarmHarvestReply
+    if reply_body is None:
+        print("Message de reponse non trouve.")
+        return
+
+    fields = walk_protobuf(reply_body)
+    has_error = False
+    collected_any = False
+    for fn, wt, val in fields:
+        if fn == 99:
+            has_error = True
+            print("Erreur, code : " + str(val))
+        elif fn == 2 and wt == "bytes":
+            # champ 2 = "rewards" (PBList<Resource>), chaque occurrence
+            # est un Resource individuel (meme pattern que TDCity/quetes).
+            res_fields = walk_protobuf(val)
+            res = {f: v for f, wt2, v in res_fields if wt2 == "varint"}
+            if res:
+                res_name = CURRENCY_NAMES.get(res.get(1), "Type " + str(res.get(1)))
+                value = res.get(3, res.get(2, 0))
+                log_event("Recolte de ferme (enclos " + str(pen_id) + ") : +" +
+                           str(value) + " " + res_name)
+                collected_any = True
+
+    if has_error:
+        print("Echec de la recolte.")
+    elif collected_any:
+        print("Recolte reussie !")
+    else:
+        print("Rien a recolter pour l'instant.")

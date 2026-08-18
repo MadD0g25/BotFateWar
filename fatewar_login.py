@@ -47,6 +47,16 @@ def do_ls_login(ls_host=None, ls_port=None):
         if total == 0:
             return None, None, None
 
+        # Toujours afficher la reponse brute et le type de message recu -
+        # sans ca, impossible de diagnostiquer un echec silencieux (par
+        # exemple si le serveur renvoie une erreur au lieu du succes
+        # attendu, avec une structure de champs completement differente).
+        print("Reponse brute : " + response.hex())
+        if len(response) >= 4:
+            msg_type = int.from_bytes(response[2:4], "little")
+            print("Type de message recu : " + str(msg_type) +
+                  " (attendu : 10142, kMsgLS2CLLoginReply)")
+
         body = response[4:]
         fields = walk_protobuf(body)
 

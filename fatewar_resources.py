@@ -170,3 +170,77 @@ def get_city_resources(sock):
         print("  " + name + " : " + str(value))
 
     return resources
+
+
+BUILDING_STATUS_NAMES = {
+    0: "Aucun", 1: "En amelioration", 2: "En attente d'activation",
+    3: "Normal", 4: "En cours de suppression",
+}
+
+
+def get_city_buildings(sock):
+    """Interroge CityInfoRequest et liste TOUS les batiments de la ville
+    avec leur id/type/niveau/statut, directement depuis CityInfoReply
+    (champ 1 "map" -> champ 1 "buildings"). Utile pour decouvrir
+    automatiquement tes building_id sans avoir a faire une capture
+    reseau manuelle pour chaque batiment que tu veux automatiser.
+
+    ATTENTION : le "type" renvoye est un identifiant numerique interne du
+    jeu - dump.cs ne contient que la STRUCTURE du code, pas les donnees
+    de configuration reelles (noms/valeurs), qui vivent dans des fichiers
+    d'assets separes qu'on n'a pas. Impossible donc de traduire ces
+    "type" en noms lisibles ("Caserne", "Ferme"...) sans capture
+    complementaire - mais ca reste tres utile pour repartir les
+    batiments par groupes et reperer les IDs a utiliser."""
+    print("\n=== RECUPERATION : Liste des batiments de la ville ===")
+    packet = build_frame("2b27", b"")  # kMsgCL2GSCityInfoRequest = 10027
+    sock.sendall(packet)
+    response, total = recv_all(sock, drain_seconds=6)
+
+    if total == 0:
+        print("Aucune reponse.")
+        return []
+
+    decompressed = find_message_of_type(response, 10028)  # kMsgGS2CLCityInfoReply
+    if decompressed is None:
+        print("Message CityInfoReply non trouve.")
+        return []
+
+    top_fields = walk_protobuf(decompressed)
+    buildings = []
+    for fn, wt, val in top_fields:
+        if fn != 1 or wt != "bytes":
+            continue  # champ 1 = "map" (CityInfo)
+        for ifn, iwt, ival in walk_protobuf(val):
+            if ifn != 1 or iwt != "bytes":
+                continue  # champ 1 de CityInfo = "buildings" (repeated)
+            b_fields = walk_protobuf(ival)
+            b = {}
+            for bfn, bwt, bval in b_fields:
+                if bfn == 1:
+                    b["id"] = bval
+                elif bfn == 2:
+                    b["type"] = bval
+                elif bfn == 3:
+                    b["level"] = bval
+                elif bfn == 5:
+                    b["status"] = bval
+            if b:
+                buildings.append(b)
+
+    print(str(len(buildings)) + " batiment(s) trouve(s) :")
+    # Regroupes par type pour faciliter la lecture (plusieurs batiments
+    # du meme type ont generalement des besoins/usages similaires).
+    by_type = {}
+    for b in buildings:
+        by_type.setdefault(b.get("type"), []).append(b)
+
+    for btype in sorted(by_type):
+        entries = by_type[btype]
+        print("  Type " + str(btype) + " (" + str(len(entries)) + " batiment(s)) :")
+        for b in entries:
+            status_name = BUILDING_STATUS_NAMES.get(b.get("status"), "?")
+            print("    id=" + str(b.get("id")) + "  niveau=" + str(b.get("level")) +
+                  "  statut=" + status_name)
+
+    return buildings

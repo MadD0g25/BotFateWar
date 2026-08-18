@@ -68,7 +68,11 @@ def upgrade_building(sock, building_id, queue_index=0):
 
     if has_error:
         error_code = next(val for fn, wt, val in fields if fn == 99)
-        print("Echec de l'amelioration, code erreur : " + str(error_code))
+        if error_code == 5212:  # kECCityWorkQueueBusy
+            print("Toutes les files de construction sont occupees (batiment #" +
+                  str(building_id) + " en attente, retentera au prochain cycle).")
+        else:
+            print("Echec de l'amelioration, code erreur : " + str(error_code))
     else:
         log_event("Amelioration lancee : batiment #" + str(building_id))
         if end_time:

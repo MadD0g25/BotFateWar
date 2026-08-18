@@ -1,4 +1,5 @@
 config.py
+bot_config.py
 fatewar_bot.log
 fatewar_debug.log
 fatewar_state.json

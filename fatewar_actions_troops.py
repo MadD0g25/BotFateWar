@@ -168,3 +168,45 @@ def claim_finished_training(sock, barrack_id):
     else:
         log_event("Troupes recuperees (caserne " + str(barrack_id) + ")")
         return {"claimed": True, "still_training": False, "queue_empty": False, "end_time": end_time}
+
+
+def train_max_troops(sock, barrack_id, army_id, candidates=None):
+    """Lance l'entrainement avec la plus grande quantite possible, sans
+    avoir a la deviner/regler manuellement a chaque fois.
+
+    IMPORTANT sur la methode : le serveur ne renvoie jamais le "maximum
+    autorise" directement (verifie dans dump.cs - TrainReply n'a qu'un
+    error_code). Le bouton "max" de l'app le calcule cote client a partir
+    du cout par unite (donnee qu'on n'a pas). Ici, on teste une serie de
+    quantites decroissantes et on s'arrete a la premiere qui reussit -
+    une tentative refusee pour ressources insuffisantes ne consomme rien
+    (verifie empiriquement), donc cette methode ne risque jamais de
+    lancer deux entrainements ou de gaspiller des ressources. Une fois
+    qu'une quantite reussit, on s'arrete immediatement (pas de nouvel
+    essai apres un succes)."""
+    if candidates is None:
+        # Grille resserree pour ne pas "sauter" par-dessus la vraie limite
+        # (ex: si le max reel est 250, une liste trop grossiere comme
+        # [500, 200] passerait directement de 500 en echec a 200 en succes,
+        # ratant les 250 vraiment disponibles).
+        candidates = [
+            100000, 50000, 20000, 10000, 5000, 3000, 2000, 1500, 1000,
+            800, 600, 500, 450, 400, 350, 300, 280, 260, 250, 240, 220,
+            200, 180, 160, 140, 120, 100, 90, 80, 70, 60, 50, 40, 30,
+            25, 20, 15, 10, 5, 3, 1,
+        ]
+
+    print("\n=== Recherche de la quantite maximale entrainable ===")
+    for count in candidates:
+        result = train_troops(sock, barrack_id, army_id, count)
+        if result["status"] == "started":
+            return result
+        if result["status"] == "busy":
+            # Caserne occupee - pas la peine de continuer a essayer
+            # d'autres quantites, le probleme n'est pas la quantite.
+            return result
+        # "insufficient_resources" ou "error" -> on essaie plus petit
+        time.sleep(1)
+
+    print("Aucune quantite testee n'a fonctionne (meme 1 unite).")
+    return {"end_time": None, "status": "insufficient_resources"}
