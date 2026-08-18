@@ -92,13 +92,6 @@ avoir à toucher au cœur de `gs_bot.py`.
 Sur les **deux appareils**, place les fichiers nécessaires dans le même
 dossier (voir tableau ci-dessous) :
 
-```bash
-git clone https://github.com/toncompte/fatewar-bot.git
-cd fatewar-bot
-cp config.example.py config.py
-cp bot_config.example.py bot_config.py
-```
-
 Édite `config.py` avec tes identifiants (voir
 [Configuration](#-configuration--récupérer-tes-identifiants)), et
 `bot_config.py` avec tes casernes/options (voir
