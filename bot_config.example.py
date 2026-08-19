@@ -18,10 +18,10 @@ LISTEN_PORT = 5555
 # (kMsgCL2GSTrainRequest, type 10402) pendant un entrainement manuel de
 # chaque type dans l'app - voir README.md pour la procedure complete.
 # Ajoute/retire des entrees selon tes propres casernes. Mets "count": "max"
-# pour laisser le bot trouver automatiquement la plus grande quantite
-# possible a chaque cycle (teste plusieurs quantites decroissantes sans
-# risque, voir train_max_troops dans fatewar_actions_troops.py) - evite
-# d'avoir a ajuster ce fichier a chaque fois que tes ressources augmentent.
+# pour laisser le bot calculer automatiquement la plus grande quantite
+# possible a chaque cycle, a partir des vraies donnees de configuration du
+# jeu (voir fatewar_troop_data.py) - evite d'avoir a ajuster ce fichier a
+# chaque fois que tes ressources ou ton niveau de caserne augmentent.
 TRAINING_SLOTS = [
     # {"barrack_id": TON_ID, "army_id": TON_ARMY_ID, "count": "max"},
 ]
@@ -31,12 +31,16 @@ TRAINING_SLOTS = [
 # BATIMENTS
 # ----------------------------------------------------------------------------
 # Amelioration automatique de TOUS les batiments disponibles. A chaque
-# cycle, le bot liste tous tes batiments (get_city_buildings), et lance
-# l'amelioration de chacun de ceux au statut "Normal" (libre, pas deja en
-# cours). Comme plusieurs batiments partagent les memes ressources,
-# certains echoueront naturellement par manque de ressources tant que les
-# autres n'ont pas fini - pas grave, ils seront retentes au prochain cycle.
+# cycle, le bot verifie d'abord combien d'ameliorations sont DEJA en cours
+# (statut "Upgrading"), et ne lance de nouvelles ameliorations que sur les
+# places encore libres dans la limite de MAX_CONCURRENT_BUILDING_UPGRADES -
+# evite de spammer des tentatives vouees a l'echec (erreur "file occupee").
 AUTO_UPGRADE_ALL_BUILDINGS = False
+
+# Nombre de files de construction simultanees autorisees par le jeu (VIP/
+# niveau du compte). Observe a 2 en pratique - augmente cette valeur si tu
+# debloques plus de files.
+MAX_CONCURRENT_BUILDING_UPGRADES = 2
 
 # Optionnel : IDs de batiments a ne jamais ameliorer automatiquement
 # (par exemple si tu veux garder le controle manuel sur un batiment
@@ -62,6 +66,56 @@ ENABLE_GUILD_FEATURES = False
 GUILD_TECH_ID = None
 GUILD_TECH_LEVEL = 1
 GUILD_TECH_DONATE_TIMES = 10
+
+
+# ----------------------------------------------------------------------------
+# RECHERCHE PERSONNELLE (arbre technologique de ta ville)
+# ----------------------------------------------------------------------------
+# Optionnel, desactive par defaut (mettre PERSONAL_TECH_ID a None). C'est
+# la recherche ACTUELLEMENT selectionnee dans ton arbre - change avec ta
+# progression, a mettre a jour manuellement de temps en temps.
+PERSONAL_TECH_ID = None
+
+# Recompense de chapitre d'histoire : actif par defaut, aucun risque
+# (bouton "tout reclamer" sans parametre).
+CLAIM_CHAPTER_AWARD = True
+
+# Talents de heros a ameliorer automatiquement (bouton "recommande" de
+# l'app) : optionnel, liste vide par defaut. hero_id propre a ton compte.
+HERO_TALENT_IDS = []
+
+# Taches quotidiennes a reclamer : optionnel, liste vide par defaut (les
+# task_id changent chaque jour, pas encore de decouverte automatique).
+DAILY_TASK_IDS = []
+
+
+# ----------------------------------------------------------------------------
+# COMBATS AUTOMATIQUES CONTRE MONSTRES CORROMPUS
+# ----------------------------------------------------------------------------
+# Reproduit le flow manuel : loupe -> recherche par niveau -> ATQ ->
+# rassemblement des troupes -> lancer. Une seule requete de recherche
+# (par niveau choisi) donne directement la cible a attaquer - confirme
+# par capture reseau reelle, bien plus fiable qu'une notification radar
+# passive. Optionnel, desactive par defaut - ATTENTION, action la plus
+# sensible du bot (envoie de vraies troupes), verifie bien que ta config
+# laisse assez de troupes de defense en ville avant d'activer.
+AUTO_ATTACK_MONSTERS = False
+
+# Niveau de Corrompu a rechercher (correspond au curseur "Niveau" dans
+# l'app). Augmente-le au fur et a mesure que tes troupes montent en
+# puissance.
+MONSTER_ATTACK_LEVEL = 5
+
+# Heros a envoyer sur chaque attaque - propres a ton compte, trouves par
+# capture reseau (kMsgCL2GSCreateMarchRequest).
+BATTLE_HERO1 = None
+BATTLE_HERO2 = None
+
+# Composition de troupes a envoyer sur chaque attaque - meme format que
+# TRAINING_SLOTS. ATTENTION : contrairement a l'entrainement, il n'y a
+# pas de mode "max" automatique ici - choisis une quantite qui laisse
+# suffisamment de troupes de defense dans ta ville.
+BATTLE_TROOPS = []
 
 
 # ----------------------------------------------------------------------------

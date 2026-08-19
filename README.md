@@ -23,7 +23,8 @@
 - [Configuration : récupérer tes identifiants](#-configuration--récupérer-tes-identifiants)
 - [Fonctionnalités](#-fonctionnalités)
 - [Reprise après plantage](#-reprise-après-plantage)
-- [Capturer tes propres IDs (casernes, bâtiments, etc.)](#-capturer-tes-propres-ids)
+- [Capturer tes propres IDs](#-capturer-tes-propres-ids)
+- [Extraction des données de jeu (AssetStudio)](#-extraction-des-données-de-jeu-assetstudio)
 - [Journal des découvertes et de l'avancement](#-journal-des-découvertes-et-de-lavancement)
 - [Ce qui manque](#-ce-qui-manque--contributions-bienvenues)
 - [Renouvellement des identifiants](#-renouvellement-des-identifiants)
@@ -42,7 +43,9 @@
 | 🍎 **Login iOS uniquement** | Le login sur le *Login Server* ne fonctionne, à ce jour, que depuis un appareil Apple réel (iPhone/iPad/Mac). Une vérification d'empreinte réseau bas niveau bloque les connexions depuis Linux (testé et confirmé à plusieurs reprises). |
 | 📱 **a-Shell recommandé** | Sur iOS, exécute le script dans [a-Shell](https://apps.apple.com/app/a-shell/id1473805438) (gratuit). |
 | ⏱️ **Pas de bot continu sur iOS** | Les apps iOS étant suspendues en arrière-plan, a-Shell ne peut pas faire tourner un bot pendant des heures — d'où l'architecture à deux appareils ci-dessous. |
-| 🚦 **Rate-limit possible** | Une limitation de fréquence semble exister sur les tentatives de connexion au Login Server, en particulier après plusieurs tentatives rapprochées — laisse reposer 1-2h si ça persiste. Un deuxième serveur LS est disponible en secours (`ls_login.py 2`), mais s'est révélé peu fiable en pratique (voir [journal des découvertes](#-journal-des-découvertes-et-de-lavancement)). |
+| 🚦 **Rate-limit possible** | Une limitation de fréquence semble exister sur les tentatives de connexion au Login Server après plusieurs tentatives rapprochées — laisse reposer 1-2h si ça persiste. |
+| ⚔️ **Combat automatique = risque élevé** | La fonctionnalité d'attaque de monstres envoie de vraies troupes. Vérifie toujours ta configuration avant de l'activer (voir [Fonctionnalités](#-fonctionnalités)). |
+| 🕐 **Maintenance serveur** | Une coupure après plusieurs heures de fonctionnement continu peut simplement correspondre à une maintenance planifiée côté serveur (annoncée dans le jeu), pas un bug du bot. |
 
 ---
 
@@ -70,13 +73,16 @@ la première nécessite un appareil Apple ; la seconde peut tourner
 
 | Fichier | Rôle |
 |---|---|
-| `bot_config.py` | **Toute la configuration** — casernes, bâtiments, guilde, TDCity... C'est le seul fichier que tu dois éditer au quotidien. |
-| `fatewar_core.py` | Encodage/décodage Protobuf bas niveau, journal, état persistant, décompression zlib automatique |
+| `bot_config.py` | **Toute la configuration** — casernes, bâtiments, guilde, combats, TDCity... Le seul fichier à éditer au quotidien. |
+| `fatewar_core.py` | Encodage/décodage Protobuf bas niveau, journal, état persistant, décompression zlib automatique, réception réseau avec limite de temps totale |
 | `fatewar_login.py` | Connexion Login Server + Game Server, maintien de session |
-| `fatewar_actions_troops.py` | Entraînement et récupération de troupes (multi-casernes, quantité "max" automatique) |
-| `fatewar_actions_building.py` | Amélioration de bâtiments |
-| `fatewar_actions_rewards.py` | Gains hors ligne, tâches/quêtes, courrier, guilde (ressources/aide/dons/cadeaux), collecte citoyenne, ferme, sign-in |
+| `fatewar_actions_troops.py` | Entraînement et récupération de troupes — calcul direct du maximum entraînable (voir `fatewar_troop_data.py`) |
+| `fatewar_actions_building.py` | Amélioration de bâtiments, gestion des erreurs structurelles/de file |
+| `fatewar_actions_rewards.py` | Gains hors ligne, tâches/quêtes, courrier, guilde (ressources/aide/dons/cadeaux), collecte citoyenne, ferme |
 | `fatewar_actions_tdcity.py` | Combats de zone TDCity (exploration de parcelles), quêtes principales |
+| `fatewar_actions_misc.py` | Recherche personnelle, récompenses de chapitre/quotidiennes, amélioration de talent de héros, soin à l'hôpital |
+| `fatewar_actions_battle.py` | Recherche et attaque de monstres Corrompus |
+| `fatewar_troop_data.py` | **Vraies données de jeu** extraites via AssetStudio — coût par unité de 321 troupes, capacité de caserne par niveau, calcul direct du maximum entraînable |
 | `fatewar_resources.py` | Totaux de ressources en temps réel, liste des bâtiments de la ville |
 | `gs_bot.py` | **Script principal (Pi)** — orchestre tous les modules ci-dessus, lit `bot_config.py` |
 | `ls_login.py` | **Script iPhone** — login initial uniquement |
@@ -92,13 +98,19 @@ avoir à toucher au cœur de `gs_bot.py`.
 Sur les **deux appareils**, place les fichiers nécessaires dans le même
 dossier (voir tableau ci-dessous) :
 
+```bash
+git clone https://github.com/toncompte/fatewar-bot.git
+cd fatewar-bot
+cp config.example.py config.py
+cp bot_config.example.py bot_config.py
+```
+
 Édite `config.py` avec tes identifiants (voir
 [Configuration](#-configuration--récupérer-tes-identifiants)), et
 `bot_config.py` avec tes casernes/options (voir
 [Capturer tes propres IDs](#-capturer-tes-propres-ids)).
 
-Dans `bot_config.py`, `LISTEN_PORT` peut rester par défaut. Dans
-`ls_login.py`, renseigne l'IP locale de ton Raspberry Pi :
+Dans `ls_login.py`, renseigne l'IP locale de ton Raspberry Pi :
 
 ```python
 PI_HOST = "192.168.1.XXX"   # trouve-la avec "hostname -I" sur le Pi
@@ -116,6 +128,9 @@ PI_HOST = "192.168.1.XXX"   # trouve-la avec "hostname -I" sur le Pi
 | `fatewar_actions_building.py` | ❌ | ✅ |
 | `fatewar_actions_rewards.py` | ❌ | ✅ |
 | `fatewar_actions_tdcity.py` | ❌ | ✅ |
+| `fatewar_actions_misc.py` | ❌ | ✅ |
+| `fatewar_actions_battle.py` | ❌ | ✅ |
+| `fatewar_troop_data.py` | ❌ | ✅ |
 | `fatewar_resources.py` | ❌ | ✅ |
 | `ls_login.py` | ✅ | ❌ |
 | `gs_bot.py` | ❌ | ✅ |
@@ -139,7 +154,7 @@ python3 ls_login.py 2     # serveur LS alternatif si rate-limite
 
 Le nonce est transmis automatiquement, le bot démarre **immédiatement**
 côté Pi. Ferme a-Shell ensuite — le Pi continue seul, en boucle,
-potentiellement pendant des jours (voir [Reprise après plantage](#-reprise-après-plantage)).
+potentiellement pendant des heures (voir [Reprise après plantage](#-reprise-après-plantage)).
 
 **Pour une nouvelle session** (la connexion GS finit par expirer), relance
 `gs_bot.py` puis `ls_login.py`. L'état (casernes, bâtiments, position
@@ -209,72 +224,101 @@ cp config.example.py config.py
 
 | Action | Statut | Module | Détail |
 |---|:---:|---|---|
-| **Login complet** (LS + GS) | ✅ Stable | `fatewar_login.py` | Deux appareils, serveur LS de secours (peu fiable, voir découvertes) |
+| **Login complet** (LS + GS) | ✅ Stable | `fatewar_login.py` | Deux appareils, serveur LS de secours |
 | **Maintien de session** | ✅ Stable | `fatewar_login.py` | Keepalive natif du jeu (`KeepLiveRequest`), toutes les 5s |
-| **Gains hors ligne** | ⚠️ Incertain | `fatewar_actions_rewards.py` | Renvoie systématiquement vide même quand l'app affiche des valeurs — probablement calculé côté client, jamais confirmé transmis par le réseau malgré plusieurs captures dédiées |
-| **Entraînement multi-casernes** | ✅ Stable | `fatewar_actions_troops.py` | Plusieurs casernes en parallèle, quantité "max" auto-détectée sans gaspillage |
-| **Récupération de troupes** | ✅ Stable | `fatewar_actions_troops.py` | Distingue "encore en cours" de "caserne vide" (piège Protobuf, voir découvertes) |
-| **Amélioration de tous les bâtiments** | ✅ Stable | `fatewar_actions_building.py` + `fatewar_resources.py` | Découverte automatique via `get_city_buildings()`, aucun ID à chercher manuellement |
-| **Tâches/quêtes de guilde** | ✅ Stable | `fatewar_actions_rewards.py` | Écoute en continu |
-| **Quêtes principales** | ✅ Stable | `fatewar_actions_tdcity.py` | `claim_main_task_reward()` |
+| **Entraînement multi-casernes** | ✅ Stable | `fatewar_actions_troops.py` | Quantité "max" **calculée directement** à partir des vraies données de jeu (niveau de caserne + ressources), avec repli automatique sur tâtonnement si besoin |
+| **Récupération de troupes** | ✅ Stable | `fatewar_actions_troops.py` | Distingue "encore en cours" de "caserne vide" |
+| **Amélioration de tous les bâtiments** | ✅ Stable | `fatewar_actions_building.py` + `fatewar_resources.py` | Découverte automatique, gère les files simultanées et les mises en pause après échec structurel |
+| **Recherche personnelle** | ✅ Stable | `fatewar_actions_misc.py` | Lance et réclame automatiquement (`PERSONAL_TECH_ID`) |
+| **Combat automatique contre Corrompus** | ✅ Stable (risqué) | `fatewar_actions_battle.py` | Recherche par niveau puis attaque immédiate, vérifié octet-par-octet contre une vraie capture |
+| **Soin à l'hôpital** | 🔧 Disponible, pas automatisé | `fatewar_actions_misc.py` | Nécessite de connaître le nombre de blessés par type (pas encore de découverte automatique) |
+| **Tâches de guilde/principales/chapitre/quotidiennes** | ✅ Stable | `fatewar_actions_rewards.py` / `fatewar_actions_tdcity.py` / `fatewar_actions_misc.py` | Écoute en continu ou réclamation groupée selon le type |
 | **Courrier** | ✅ Stable | `fatewar_actions_rewards.py` | Détection et réclamation automatique |
-| **Ressources de guilde + aide aux membres** | ✅ Stable | `fatewar_actions_rewards.py` | Désactivable en bloc (`ENABLE_GUILD_FEATURES`) |
-| **Don à la recherche de guilde** | ✅ Stable | `fatewar_actions_rewards.py` | Reproduit le "spam" du vrai client |
-| **Cadeaux de guilde et quotidiens (mall)** | ✅ Stable | `fatewar_actions_rewards.py` | Boutons "tout réclamer", sans risque |
-| **Collecte citoyenne** | ✅ Stable | `fatewar_actions_rewards.py` | Correspond à l'écran "Détails fiscaux" |
-| **Récolte de ferme** | ✅ Stable | `fatewar_actions_rewards.py` | Mini-jeu séparé découvert tardivement |
+| **Ressources de guilde + aide aux membres + don recherche + cadeaux** | ✅ Stable | `fatewar_actions_rewards.py` | Désactivable en bloc (`ENABLE_GUILD_FEATURES`) |
+| **Talents de héros (amélioration recommandée)** | ✅ Stable | `fatewar_actions_misc.py` | Bouton "1 clic" de l'app reproduit |
+| **Collecte citoyenne / Récolte de ferme** | ✅ Stable | `fatewar_actions_rewards.py` | IDs propres au compte à renseigner |
 | **Combats de zone TDCity** | ✅ Stable | `fatewar_actions_tdcity.py` | Exploration incrémentale de parcelles, limite configurable |
-| **Totaux de ressources réels** | ✅ Stable | `fatewar_resources.py` | Bois/nourriture/pierre/fer/connaissances confirmés via `CityInfoReply` compressé |
-| **Reprise après plantage** | ✅ Stable | `fatewar_core.py` | État sauvegardé sur disque, fusion propre (pas d'écrasement) |
+| **Totaux de ressources réels** | ✅ Stable | `fatewar_resources.py` | Bois/nourriture/pierre/fer/connaissances confirmés |
+| **Reprise après plantage** | ✅ Stable | `fatewar_core.py` | État sauvegardé sur disque, fusion propre |
+| **Gains hors ligne** | ❌ Désactivé | — | Jamais confirmé transmis par le réseau (voir journal) |
 | **Sign-in quotidien** | ❌ Désactivé | `fatewar_actions_rewards.py` | Jamais confirmé fonctionnel |
-| **Système citoyen complet (Appoint/Arrived)** | 🔍 Repéré, non implémenté | — | Trop complexe (UUID, plusieurs étapes) pour une automatisation fiable |
-| **Construction de nouveau bâtiment** | 🔍 Repéré, non implémenté | — | Confirmé par capture (`CityCreateBuildingRequest`), mais nécessite de choisir un emplacement |
+| **Système citoyen complet (Appoint/Arrived)** | 🔍 Repéré, non implémenté | — | Trop complexe (UUID, plusieurs étapes) |
+| **Construction de nouveau bâtiment** | 🔍 Repéré, non implémenté | — | Confirmé par capture, nécessite un choix d'emplacement |
+| **Système d'auto-combat natif du jeu** | 🔍 Repéré, non implémenté | — | Existe dans le code (`StartAutoFightMonsterRequest`), jamais capturé en usage réel |
 
 ---
 
 ## 🔄 Reprise après plantage
 
 Le bot sauvegarde automatiquement dans `fatewar_state.json` le timestamp
-de fin connu de chaque caserne, bâtiment et la position TDCity, à chaque
-mise à jour — en **fusionnant** avec l'existant (pas d'écrasement, bug
-corrigé pendant le développement). Si le bot plante ou redémarre, il
-reprend directement avec l'heure connue.
+de fin connu de chaque caserne, la position TDCity, à chaque mise à jour —
+en **fusionnant** avec l'existant (pas d'écrasement). Si le bot plante ou
+redémarre, il reprend directement avec l'heure connue.
 
 ---
 
 ## 🏰 Capturer tes propres IDs
 
-Les valeurs par défaut dans `bot_config.py` sont vides ou correspondent au
-compte de développement — **remplace-les par les tiennes**.
+Les valeurs par défaut dans `bot_config.py` sont vides — remplace-les par
+les tiennes.
 
 ### Casernes (`TRAINING_SLOTS`)
-1. Capture le trafic TCP brut vers le Game Server (`tcpdump`, port 12040-12056 selon session) pendant un entraînement manuel, une fois par type de troupe.
-2. Cherche le message type `10402` (`kMsgCL2GSTrainRequest`, octets `a2 28`).
+1. Capture le trafic TCP brut vers le Game Server pendant un entraînement manuel, une fois par type de troupe.
+2. Cherche le message type `10402` (`kMsgCL2GSTrainRequest`).
 3. Le corps contient `army` (army_id + count) et `barrack_id`.
 4. Renseigne `TRAINING_SLOTS` dans `bot_config.py`.
 
-> 💡 `army_id` semble provenir d'une table de config globale du jeu
-> (`TroopCfgData`) — potentiellement identique pour tous les comptes ayant
-> le même type de troupe débloqué (confirmé à plusieurs reprises entre
-> deux comptes différents : `1001`=lanceurs de haches, `1101`=berserkers,
-> `1201`=cavalerie, de façon constante). `barrack_id` reste propre à
-> chaque ville, mais suit souvent un schéma proche (`8`, `~1004-1007`).
+> 💡 `army_id` provient d'une table de config globale du jeu — identique
+> pour tous les comptes ayant le même type de troupe débloqué (confirmé
+> à plusieurs reprises entre deux comptes différents). `barrack_id`
+> reste propre à chaque ville.
 
 ### Bâtiments
-Aucune capture nécessaire ! `AUTO_UPGRADE_ALL_BUILDINGS = True` dans
-`bot_config.py` découvre et améliore automatiquement tout ce qui est
-disponible.
+Aucune capture nécessaire ! `AUTO_UPGRADE_ALL_BUILDINGS = True` découvre
+et améliore automatiquement tout ce qui est disponible.
 
-### Ressources de guilde, aide, don à la recherche
-Passe `ENABLE_GUILD_FEATURES = True` une fois dans une guilde. Pour
-`GUILD_TECH_ID`, capture une requête `GuildTechDonateRequest` (type
-`10655`) pendant que tu contribues manuellement à une recherche.
+### Combat contre Corrompus (`BATTLE_HERO1/2`, `BATTLE_TROOPS`)
+Capture le flow manuel complet : loupe → recherche → ATQ → rassemblement
+des troupes → lancer. Cherche `kMsgCL2GSCreateMarchRequest` (type
+`10126`) — le corps contient tes IDs de héros et la composition d'armée
+exacte que tu as envoyée.
 
-### Collecte citoyenne / Ferme / TDCity
+### Recherche personnelle / Guilde / Citoyens / Ferme
 Voir les commentaires dans `bot_config.py` — chacun nécessite une capture
-ciblée de l'action correspondante en jeu (`CitizenCollectSettleRequest`
-type `12348`, `FarmHarvestRequest` type `13147`,
-`TDCitySetStateRequest` type `14298`).
+ciblée de l'action correspondante en jeu.
+
+---
+
+## 🧰 Extraction des données de jeu (AssetStudio)
+
+En plus du protocole réseau, certaines données de configuration statiques
+du jeu (coûts d'entraînement, capacités par niveau) peuvent être extraites
+directement des assets de l'app avec **AssetStudio**
+([github.com/aelurum/AssetStudio](https://github.com/aelurum/AssetStudio)),
+sans passer par une capture réseau.
+
+**Procédure résumée :**
+1. Ouvre AssetStudio, charge le dossier `assets` extrait de l'APK
+2. Configure le support IL2Cpp avec `global-metadata.dat` + `libil2cpp.so`
+3. Filtre par type `MonoBehaviour`, cherche par nom (`troop`, `hero`,
+   `city_barracks_lv`...)
+4. Onglet **Dump** pour voir le contenu structuré, **Export** pour extraire
+
+**Déjà extrait et intégré** (voir `fatewar_troop_data.py`) :
+- `troop` : coût en ressources par unité, pour 321 types de troupes
+- `city_barracks_lv` : capacité de la file d'entraînement par niveau de
+  caserne (0 à 30), indépendante du type de troupe
+
+Ces deux tables permettent de **calculer directement** la quantité
+maximale entraînable, sans tâtonnement réseau.
+
+**Pistes non abouties** (recherches infructueuses pendant cette session) :
+- Table de traduction des noms (héros, troupes) — les tables de données
+  ne contiennent que des clés (`hero_name5001`), pas les noms affichés ;
+  la table de traduction correspondante n'a pas été localisée
+- Table des types de ressources/monnaies (`CurrencyType`) — aucune table
+  nommée de façon évidente n'a été trouvée ; les codes `2414`/`2424`
+  restent non identifiés
 
 ---
 
@@ -284,94 +328,115 @@ Historique des trouvailles marquantes de ce projet, dans l'ordre
 chronologique — utile pour comprendre certains choix de code inhabituels.
 
 **Protocole de base**
-- Login en deux serveurs (LS puis GS), architecture à deux appareils imposée par une vérification d'empreinte TCP (Linux rejeté par le LS).
-- Plusieurs messages peuvent arriver concaténés dans un seul paquet TCP — le parsing découpe toujours par longueur, jamais en supposant un seul message.
+Login en deux serveurs (LS puis GS), architecture à deux appareils imposée
+par une vérification d'empreinte TCP (Linux rejeté par le LS). Plusieurs
+messages peuvent arriver concaténés dans un seul paquet TCP.
 
-**Le vrai bug du heartbeat (correction majeure)**
-Le "ping" utilisé pendant des jours (`0400a127`) n'était pas un keepalive
-du tout mais `kMsgCL2GSEnterGameRequest` (une action à usage unique !). Le
-vrai keepalive est `kMsgCL2GSKeepLiveRequest` (type `10006`, confirmé par
-capture réelle). Ce mélange expliquait la quasi-totalité des coupures de
-connexion après 1-2 minutes.
+**Le vrai bug du heartbeat**
+Le "ping" utilisé initialement (`0400a127`) n'était pas un keepalive du
+tout mais `kMsgCL2GSEnterGameRequest` (une action à usage unique). Le vrai
+keepalive est `kMsgCL2GSKeepLiveRequest` (type `10006`). Ce mélange
+expliquait la quasi-totalité des coupures de connexion après 1-2 minutes.
 
 **Le piège des valeurs par défaut Protobuf**
 En Protobuf, un champ valant `0` n'est **jamais transmis** sur le réseau.
-Conséquence concrète : le code d'erreur `5809` (récupération de troupes)
-est renvoyé aussi bien pour "encore en cours" (`work_status=1`) que pour
-"caserne vide" (`work_status=0`, donc **absent** du message) — deux
-situations demandant une réaction opposée. Contrôler `work_status is None`
-→ traiter comme `0` a réglé un vrai risque de blocage infini.
+Le code d'erreur `5809` (récupération de troupes) est renvoyé aussi bien
+pour "encore en cours" que pour "caserne vide" (statut absent, donc
+implicitement 0) — deux situations demandant une réaction opposée.
 
 **Compression zlib des grosses réponses**
-`CityInfoReply` (et d'autres réponses volumineuses) arrivent enveloppées
-dans un `CompressedMessage` générique (type `14028`, zlib). Sans cette
-découverte, les totaux de ressources réels étaient invisibles.
+`CityInfoReply` et d'autres réponses volumineuses arrivent enveloppées
+dans un `CompressedMessage` générique (type `14028`, zlib).
 `find_message_of_type()` gère cette décompression automatiquement pour
 tous les modules.
 
 **Ressources mal nommées**
-`CurrencyType` 2 s'appelle en interne `kCurrencyTypeOil` ("pétrole") mais
-correspond en réalité à la **Pierre** affichée en jeu — un nom de code
-hérité, sans rapport avec l'affichage. Par déduction, le type `5`
-("Steel") correspond au **Fer**, distinct de la Pierre.
+`CurrencyType` 2 s'appelle en interne `kCurrencyTypeOil` mais correspond
+en réalité à la **Pierre** affichée en jeu — un nom de code hérité, sans
+rapport avec l'affichage. Confirmé par comparaison directe avec des
+captures d'écran des vraies valeurs en jeu.
 
 **Gains hors ligne : mystère non résolu**
-Malgré plusieurs captures réseau ciblées (dont une avec de vraies valeurs
-visibles à l'écran : 1510 bois, 604 pierre, 1229 nourriture), **aucune**
-de ces valeurs n'a jamais été retrouvée dans le trafic réseau, même après
-décompression zlib exhaustive sur toute la capture. Hypothèse retenue :
-l'affichage est calculé côté client (taux de production × temps hors
-ligne), sans transmission serveur au moment de l'ouverture de la popup.
+Malgré plusieurs captures ciblées avec des valeurs visibles à l'écran,
+**aucune** de ces valeurs n'a jamais été retrouvée dans le trafic réseau,
+même après décompression zlib exhaustive. Hypothèse retenue : l'affichage
+est calculé côté client, sans transmission serveur. Fonctionnalité
+désactivée — de toute façon peu utile pour un bot qui tourne en continu
+(jamais de vraie "période hors ligne" à compenser).
 
 **Changement de compte : le piège `KEY_UUID`**
 En passant à un second compte (compte IGG lié, vs compte invité), le
-`KEY_UUID` a été incorrectement recalculé depuis le champ `"key"` d'un JWT
-— alors qu'une comparaison octet-par-octet avec le trafic réel de l'app a
-confirmé que ce champ **ne change jamais**, quel que soit le compte
-connecté. Le vrai blocage n'était donc pas un rate-limit comme supposé au
-début, mais cette valeur incorrecte.
+`KEY_UUID` a été incorrectement recalculé depuis le champ `"key"` d'un
+JWT — alors qu'une comparaison octet-par-octet avec le trafic réel de
+l'app a confirmé que ce champ **ne change jamais**, quel que soit le
+compte connecté.
 
 **Multi-casernes et découverte de bâtiments**
 `army_id` semble être une constante globale du jeu (confirmée identique
 sur deux comptes différents), tandis que `barrack_id` reste propre à
-chaque ville. `get_city_buildings()` (via `CityInfoReply`) permet de lister
-tous les bâtiments d'un compte automatiquement, sans capture manuelle par
-bâtiment.
+chaque ville. `get_city_buildings()` permet de lister tous les bâtiments
+d'un compte automatiquement.
 
 **TDCity et quêtes principales**
-Une session de capture "libre" (jouer normalement pendant 15 minutes avec
-`tcpdump` actif) a révélé un système de combats de zone entièrement
-séparé (`TDCitySetStateRequest`/`TDCityAreaBattleAwardRequest`), résolu
-**instantanément** côté serveur (contrairement à l'entraînement/
-amélioration qui prennent du temps réel) - confirmé par un cas gagné
-(deux transitions d'état) et un cas perdu (une seule transition) sur la
-même capture.
+Une session de capture "libre" (jouer normalement avec `tcpdump` actif) a
+révélé un système de combats de zone entièrement séparé, résolu
+**instantanément** côté serveur — confirmé par un cas gagné (deux
+transitions d'état) et un cas perdu (une seule) sur la même capture.
+
+**Le bug de `recv_all()` et les coupures mystérieuses**
+Une fonction censée attendre "un silence de X secondes" pouvait en
+réalité s'éterniser indéfiniment si le serveur envoyait une grosse
+réponse en petits paquets espacés de moins que ce délai — dépassant
+parfois la patience du serveur et provoquant une coupure. Corrigé en
+ajoutant une limite de temps **totale**, indépendante des pauses entre
+paquets. A résolu plusieurs coupures observées après de grosses réponses
+(listes de bâtiments, ressources de guilde volumineuses).
+
+**Recherche, hôpital, tâches de chapitre : une session de capture complète**
+La lecture exhaustive d'une grosse capture (131 types de messages
+différents) a révélé plusieurs systèmes jamais explorés : recherche
+personnelle, soin à l'hôpital, récompenses de chapitre/quotidiennes,
+amélioration de talent de héros recommandée.
+
+**Le système de combat contre les Corrompus**
+Repéré initialement via un système de notification "radar" passif, puis
+simplifié en découvrant `MapSearchRequest` — une requête unique (niveau
+en paramètre) qui donne directement la cible à attaquer, correspondant
+exactement au bouton "Rechercher" de l'app. La composition complète d'une
+marche d'attaque (héros + troupes + position + cible) a été vérifiée
+**octet par octet** contre une vraie capture réseau avant d'être
+considérée fiable.
+
+**Extraction AssetStudio : le vrai coût des troupes**
+Face à l'impossibilité d'obtenir le "maximum entraînable" par le réseau
+(le serveur ne le transmet jamais), une extraction directe des assets du
+jeu via AssetStudio a révélé les vraies tables de configuration
+(`troop`, `city_barracks_lv`), permettant de **calculer** ce maximum au
+lieu de le deviner par tâtonnement réseau successif.
 
 ---
 
 ## 🚧 Ce qui manque (contributions bienvenues)
 
-- [ ] Comprendre le mécanisme réel des gains hors ligne (voir ci-dessus)
+- [ ] Table de traduction des noms (héros, troupes, ressources)
+- [ ] Résultat du combat contre un Corrompu (victoire/défaite, butin) — on sait lancer l'attaque, pas encore suivre son issue
+- [ ] Système d'auto-combat natif du jeu (`StartAutoFightMonsterRequest`) — repéré mais jamais capturé en usage réel
+- [ ] Découverte automatique des héros/troupes disponibles (pas de requête identifiée à ce jour)
 - [ ] Sign-in quotidien (jamais confirmé fonctionnel)
 - [ ] Construction de nouveaux bâtiments (repérée, nécessite un choix d'emplacement)
 - [ ] Système citoyen complet (`Appoint`→`Arrived`→`Settle`, complexe)
-- [ ] Utilisation d'objets d'inventaire (repérée, risque de gaspillage sans supervision)
-- [ ] Marches de troupes (attaque/récolte sur la carte du monde)
-- [ ] Arène locale (PvP — risqué d'automatiser sans supervision)
-- [ ] Machine à sous, recrutement de héros (probablement payants en monnaie premium)
+- [ ] Soin à l'hôpital automatique (nécessite de connaître le nombre de blessés par type)
 
 ---
 
 ## 🔄 Renouvellement des identifiants
 
 Le `WEB_SESSION` (JWT) reste valide plusieurs jours. Si `ls_login.py`
-échoue de façon persistante avec "connexion réinitialisée" (même après
-avoir attendu 1-2h et essayé le serveur alternatif), **vérifie d'abord que
-le vrai jeu se connecte normalement** avant de soupçonner un token expiré
-— dans notre historique, un token identique restait valide plusieurs
-jours, et le vrai problème était ailleurs (`KEY_UUID`, voir le journal des
-découvertes ci-dessus). Si le token a vraiment changé, refais une capture
-réseau (Étape 1-2 de la Configuration).
+échoue de façon persistante, **vérifie d'abord que le vrai jeu se
+connecte normalement** avant de soupçonner un token expiré — dans notre
+historique, un token identique restait valide plusieurs jours, et le vrai
+problème était ailleurs (`KEY_UUID`, voir le journal ci-dessus). Si le
+token a vraiment changé, refais une capture réseau.
 
 ---
 
@@ -394,21 +459,29 @@ automatiquement.
 
 Les types de message et structures de champs ont été extraits par
 décompilation IL2Cpp du client officiel (`global-metadata.dat` +
-`libil2cpp.so`, **non redistribués ici**).
+`libil2cpp.so`, **non redistribués ici**). Certaines données de
+configuration (coûts, capacités) ont été extraites séparément via
+AssetStudio depuis les assets Unity du jeu.
 
 ---
 
 ## 🤝 Contribuer
 
-**Process type pour ajouter une action :**
+**Process type pour ajouter une action réseau :**
 1. Trouve le nom du message dans un dump IL2Cpp (`kMsgCL2GS...Request`)
 2. Convertis sa valeur en hex little-endian
 3. Trouve la classe correspondante pour ses champs
 4. Capture une vraie requête/réponse par `tcpdump` pour valider
-5. Ajoute la fonction dans le module d'action approprié, en t'inspirant
-   du style existant (`train_troops`/`upgrade_building` pour un suivi de
-   minuteur, `check_and_claim_mail` pour une liste + réclamation groupée)
+5. Ajoute la fonction dans le module d'action approprié
 6. Ajoute les nouvelles options dans `bot_config.py`, jamais dans `gs_bot.py`
+
+**Process type pour extraire une donnée de configuration :**
+1. Trouve le nom de classe C# probable dans `dump.cs` (souvent visible
+   via les champs utilisés dans le protocole réseau, ex: `CurrencyType`)
+2. Cherche ce nom (ou une variante proche) dans AssetStudio, filtre
+   `MonoBehaviour`
+3. Vérifie que le contenu correspond (champs cohérents, valeurs
+   plausibles) avant d'intégrer
 
 ---
 

@@ -228,12 +228,28 @@ def find_all_messages_of_type(data, expected_type):
     return [body for msg_type, body in split_messages(data) if msg_type == expected_type]
 
 
-def recv_all(sock, drain_seconds=3):
+def recv_all(sock, drain_seconds=3, max_total_seconds=None):
+    """Lit tout ce qui arrive sur le socket jusqu'a un silence de
+    drain_seconds. IMPORTANT : sans limite absolue, une reponse envoyee en
+    petits paquets espaces de MOINS que drain_seconds pourrait faire
+    trainer cette fonction bien plus longtemps que prevu (chaque nouveau
+    paquet relance le compte a rebours) - au risque de depasser la
+    patience du serveur lui-meme et de provoquer une coupure de connexion
+    (observe en pratique sur une grosse reponse CityInfoReply : 57
+    secondes d'attente au lieu des ~9s habituelles, suivi d'un reset).
+    max_total_seconds plafonne le temps total, peu importe les paquets
+    recus entre-temps - par defaut, 3x drain_seconds (large marge sans
+    etre illimite)."""
+    if max_total_seconds is None:
+        max_total_seconds = drain_seconds * 3
     sock.settimeout(drain_seconds)
     chunks = []
     total = 0
+    start = time.time()
     try:
         while True:
+            if time.time() - start > max_total_seconds:
+                break
             data = sock.recv(65536)
             if not data:
                 break

@@ -11,10 +11,30 @@ from fatewar_core import (
 #   2104 -> Bois (Wood)
 #   2404 -> Nourriture (Food)
 #   2504 -> Connaissances (Knowledge/Recherche)
+#   2204/2304 -> Pierre (Stone) et Fer (Iron), dans un ordre incertain -
+#   les deux valeurs reelles etaient trop proches (316K vs 317K) pour
+#   trancher avec certitude sur une seule comparaison ; a corriger si tu
+#   remarques que c'est invers ete plus tard.
 RESOURCE_TYPE_CODES = {
     2104: "Bois (Wood)",
+    2204: "Pierre (Stone) ?",
+    2304: "Fer (Iron) ?",
     2404: "Nourriture (Food)",
     2504: "Connaissances (Knowledge)",
+}
+
+# Conversion entre les type_code de CityInfoReply (ci-dessus) et les
+# res_type "simples" utilises dans TROOP_RESOURCE_COSTS (fatewar_troop_data.py,
+# extraite directement du fichier de configuration du jeu - meme
+# numerotation que CurrencyType : 2=Pierre, 3=Nourriture, 4=Bois, 5=Fer,
+# 17=Connaissances). Necessaire pour calculer le max de troupes
+# entrainables a partir des ressources actuelles.
+TYPE_CODE_TO_CURRENCY = {
+    2104: 4,   # Bois
+    2204: 2,   # Pierre
+    2304: 5,   # Fer
+    2404: 3,   # Nourriture
+    2504: 17,  # Connaissances
 }
 
 
@@ -192,6 +212,20 @@ def get_city_buildings(sock):
     "type" en noms lisibles ("Caserne", "Ferme"...) sans capture
     complementaire - mais ca reste tres utile pour repartir les
     batiments par groupes et reperer les IDs a utiliser."""
+    buildings, _ = get_city_buildings_and_queue(sock)
+    return buildings
+
+
+def get_city_buildings_and_queue(sock):
+    """Comme get_city_buildings(), mais recupere EN PLUS les vraies heures
+    de fin des ameliorations en cours (champ 2 "queue" -> BuildQueueInfo
+    -> works, dans la MEME reponse CityInfoReply - aucun appel reseau
+    supplementaire necessaire). Permet de programmer precisement la
+    prochaine verification au lieu de sonder betement toutes les X
+    minutes, exactement comme pour les casernes.
+
+    Retourne (buildings, queue_end_times) ou queue_end_times est un dict
+    {building_id: end_time}."""
     print("\n=== RECUPERATION : Liste des batiments de la ville ===")
     packet = build_frame("2b27", b"")  # kMsgCL2GSCityInfoRequest = 10027
     sock.sendall(packet)
@@ -199,38 +233,55 @@ def get_city_buildings(sock):
 
     if total == 0:
         print("Aucune reponse.")
-        return []
+        return [], {}
 
     decompressed = find_message_of_type(response, 10028)  # kMsgGS2CLCityInfoReply
     if decompressed is None:
         print("Message CityInfoReply non trouve.")
-        return []
+        return [], {}
 
     top_fields = walk_protobuf(decompressed)
     buildings = []
-    for fn, wt, val in top_fields:
-        if fn != 1 or wt != "bytes":
-            continue  # champ 1 = "map" (CityInfo)
-        for ifn, iwt, ival in walk_protobuf(val):
-            if ifn != 1 or iwt != "bytes":
-                continue  # champ 1 de CityInfo = "buildings" (repeated)
-            b_fields = walk_protobuf(ival)
-            b = {}
-            for bfn, bwt, bval in b_fields:
-                if bfn == 1:
-                    b["id"] = bval
-                elif bfn == 2:
-                    b["type"] = bval
-                elif bfn == 3:
-                    b["level"] = bval
-                elif bfn == 5:
-                    b["status"] = bval
-            if b:
-                buildings.append(b)
+    queue_end_times = {}
 
-    print(str(len(buildings)) + " batiment(s) trouve(s) :")
-    # Regroupes par type pour faciliter la lecture (plusieurs batiments
-    # du meme type ont generalement des besoins/usages similaires).
+    for fn, wt, val in top_fields:
+        if fn == 1 and wt == "bytes":
+            # champ 1 = "map" (CityInfo) -> champ 1 = "buildings" (repeated)
+            for ifn, iwt, ival in walk_protobuf(val):
+                if ifn != 1 or iwt != "bytes":
+                    continue
+                b_fields = walk_protobuf(ival)
+                b = {}
+                for bfn, bwt, bval in b_fields:
+                    if bfn == 1:
+                        b["id"] = bval
+                    elif bfn == 2:
+                        b["type"] = bval
+                    elif bfn == 3:
+                        b["level"] = bval
+                    elif bfn == 5:
+                        b["status"] = bval
+                if b:
+                    buildings.append(b)
+        elif fn == 2 and wt == "bytes":
+            # champ 2 = "queue" (BuildQueueInfo) -> champ 1 = "works"
+            # (repeated BuildWorkInfo), chacun avec building_id + end_time.
+            for qfn, qwt, qval in walk_protobuf(val):
+                if qfn != 1 or qwt != "bytes":
+                    continue
+                w_fields = walk_protobuf(qval)
+                w_building_id = None
+                w_end_time = None
+                for wfn, wwt, wval in w_fields:
+                    if wfn == 2:
+                        w_building_id = wval
+                    elif wfn == 4:
+                        w_end_time = wval
+                if w_building_id and w_end_time:
+                    queue_end_times[w_building_id] = w_end_time
+
+    print(str(len(buildings)) + " batiment(s) trouve(s), " +
+          str(len(queue_end_times)) + " en cours de construction :")
     by_type = {}
     for b in buildings:
         by_type.setdefault(b.get("type"), []).append(b)
@@ -240,7 +291,11 @@ def get_city_buildings(sock):
         print("  Type " + str(btype) + " (" + str(len(entries)) + " batiment(s)) :")
         for b in entries:
             status_name = BUILDING_STATUS_NAMES.get(b.get("status"), "?")
+            extra = ""
+            if b.get("id") in queue_end_times:
+                extra = "  (fin: " + str(queue_end_times[b["id"]]) + ")"
             print("    id=" + str(b.get("id")) + "  niveau=" + str(b.get("level")) +
-                  "  statut=" + status_name)
+                  "  statut=" + status_name + extra)
 
-    return buildings
+    return buildings, queue_end_times
+

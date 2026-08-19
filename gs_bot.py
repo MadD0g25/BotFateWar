@@ -6,11 +6,21 @@ from bot_config import (
     LISTEN_PORT,
     TRAINING_SLOTS,
     AUTO_UPGRADE_ALL_BUILDINGS,
+    MAX_CONCURRENT_BUILDING_UPGRADES,
     EXCLUDED_BUILDING_IDS,
     ENABLE_GUILD_FEATURES,
     GUILD_TECH_ID,
     GUILD_TECH_LEVEL,
     GUILD_TECH_DONATE_TIMES,
+    AUTO_ATTACK_MONSTERS,
+    MONSTER_ATTACK_LEVEL,
+    BATTLE_HERO1,
+    BATTLE_HERO2,
+    BATTLE_TROOPS,
+    PERSONAL_TECH_ID,
+    CLAIM_CHAPTER_AWARD,
+    HERO_TALENT_IDS,
+    DAILY_TASK_IDS,
     CITIZEN_COLLECT_IDS,
     FARM_PEN_IDS,
     TD_CITY_AREA_ID,
@@ -30,7 +40,6 @@ from fatewar_actions_troops import (
 )
 from fatewar_actions_building import upgrade_building
 from fatewar_actions_rewards import (
-    collect_privilege_escrow_reward,
     check_collectible_resources,
     collect_resource,
     claim_daily_signin_reward,
@@ -48,18 +57,36 @@ from fatewar_actions_rewards import (
 from fatewar_resources import (
     get_city_resources,
     get_city_buildings,
+    get_city_buildings_and_queue,
     RESOURCE_TYPE_CODES,
+    TYPE_CODE_TO_CURRENCY,
     parse_player_attributes,
     ResourceTracker,
 )
 from fatewar_actions_tdcity import explore_next_td_grid
+from fatewar_actions_misc import (
+    start_research,
+    claim_research,
+    claim_chapter_award,
+    claim_daily_task_award,
+    upgrade_hero_talent_recommended,
+)
+from fatewar_actions_battle import search_and_attack_corrupted
 
 # Capture tout ce qui s'affiche a l'ecran (pas seulement les evenements
 # notables) dans fatewar_debug.log, avec horodatage par ligne. Utile pour
 # partager une trace complete de ce que fait le bot en cas de probleme.
 enable_full_debug_log()
 
+BUILDING_STATUS_UPGRADING = 1  # kBuildingStatus_Upgrading (deja en cours)
 BUILDING_STATUS_NORMAL = 3  # kBuildingStatus_Normal (libre, ameliorable)
+
+# Batiments temporairement mis de cote apres un echec "structurel" (pas
+# juste manque de ressources) - evite qu'un batiment bloque en boucle ne
+# monopolise indefiniment l'unique place disponible a chaque cycle.
+# {building_id: timestamp jusqu'auquel on l'ignore}
+_building_cooldowns = {}
+BUILDING_COOLDOWN_SECONDS = 1800  # 30 minutes
 
 
 def persist(end_times):
@@ -109,7 +136,31 @@ def process_barrack(sock, slot, end_times, next_check):
 
     time.sleep(1)
     if slot["count"] == "max":
-        train_result = train_max_troops(sock, bid, slot["army_id"])
+        # Recupere le niveau de la caserne et les ressources actuelles
+        # pour calculer directement la quantite max (voir
+        # fatewar_troop_data.py) au lieu de tatonner par essais reseau -
+        # si l'un des deux echoue, train_max_troops retombe automatiquement
+        # sur le tatonnement classique.
+        barrack_level = None
+        available_resources = None
+        try:
+            buildings = get_city_buildings(sock)
+            for b in buildings:
+                if b.get("id") == bid:
+                    barrack_level = b.get("level")
+                    break
+            time.sleep(1)
+            city_resources = get_city_resources(sock)
+            available_resources = {
+                TYPE_CODE_TO_CURRENCY[tc]: val
+                for tc, val in city_resources.items()
+                if tc in TYPE_CODE_TO_CURRENCY
+            }
+        except Exception:
+            pass  # en cas de souci, train_max_troops utilisera le tatonnement
+        train_result = train_max_troops(sock, bid, slot["army_id"],
+                                         barrack_level=barrack_level,
+                                         available_resources=available_resources)
     else:
         train_result = train_troops(sock, bid, slot["army_id"], slot["count"])
 
@@ -129,36 +180,92 @@ def process_barrack(sock, slot, end_times, next_check):
 
 
 def upgrade_all_available_buildings(sock):
-    """Liste tous les batiments de la ville et lance l'amelioration de
-    chacun de ceux qui sont libres (statut Normal). Certains echoueront
-    par manque de ressources si plusieurs batiments sont ameliores en
-    meme temps - c'est normal, ils seront retentes au prochain cycle."""
+    """Liste tous les batiments de la ville ET les vraies heures de fin
+    des constructions en cours (en un seul appel reseau). Compte combien
+    de files sont deja occupees, et ne lance de nouvelles ameliorations
+    que sur les places encore libres, dans la limite de
+    MAX_CONCURRENT_BUILDING_UPGRADES.
+
+    Retourne le timestamp du prochain moment ou il faut revérifier - soit
+    la fin la plus proche parmi les constructions en cours, soit un delai
+    court par defaut si on ne sait rien (aucune construction en cours et
+    aucun batiment eligible pour l'instant, ex: toutes en cooldown)."""
     if not AUTO_UPGRADE_ALL_BUILDINGS:
-        return
+        return None
 
     print("\n=== AMELIORATION AUTOMATIQUE : verification de tous les batiments ===")
-    buildings = get_city_buildings(sock)
+    buildings, queue_end_times = get_city_buildings_and_queue(sock)
+
+    upgrading_count = sum(1 for b in buildings if b.get("status") == BUILDING_STATUS_UPGRADING)
+    available_slots = MAX_CONCURRENT_BUILDING_UPGRADES - upgrading_count
+
+    print(str(upgrading_count) + "/" + str(MAX_CONCURRENT_BUILDING_UPGRADES) +
+          " file(s) de construction deja occupee(s).")
+
+    now = int(time.time())
+    next_check_time = None
+
+    if available_slots <= 0:
+        # Toutes les files sont pleines - le prochain moment utile est
+        # exactement la fin la plus proche parmi celles en cours.
+        if queue_end_times:
+            next_check_time = min(queue_end_times.values())
+            print("Aucune place libre - prochaine verification programmee " +
+                  "a la fin d'une construction (dans " +
+                  str(max(0, next_check_time - now)) + "s).")
+        else:
+            next_check_time = now + 60
+            print("Aucune place libre, mais heure de fin inconnue - " +
+                  "nouvelle verification dans 60s par securite.")
+        return next_check_time
+
     eligible = [b for b in buildings
                 if b.get("status") == BUILDING_STATUS_NORMAL
-                and b.get("id") not in EXCLUDED_BUILDING_IDS]
+                and b.get("id") not in EXCLUDED_BUILDING_IDS
+                and _building_cooldowns.get(b.get("id"), 0) <= now]
 
     if not eligible:
         print("Aucun batiment libre a ameliorer pour l'instant.")
-        return
+        # Rien d'eligible maintenant (tout en cooldown ?) - retente dans
+        # un moment raisonnable, ou a la fin d'une construction en cours
+        # si il y en a une (une place se liberera peut-etre plus vite).
+        if queue_end_times:
+            next_check_time = min(queue_end_times.values())
+        else:
+            candidates = [t for t in _building_cooldowns.values() if t > now]
+            next_check_time = min(candidates) if candidates else now + 300
+        return next_check_time
 
-    print(str(len(eligible)) + " batiment(s) libre(s), tentative d'amelioration...")
+    to_attempt = eligible[:available_slots]
+    print(str(len(to_attempt)) + " batiment(s) vont etre tentes (" +
+          str(available_slots) + " place(s) disponible(s), " +
+          str(len(eligible)) + " batiment(s) eligible(s) au total).")
+
     keepalive = bytes.fromhex("04001627")  # kMsgCL2GSKeepLiveRequest = 10006
-    for b in eligible:
+    for b in to_attempt:
         time.sleep(1)
-        upgrade_building(sock, b["id"])
+        result = upgrade_building(sock, b["id"])
+        if result["status"] == "not_eligible":
+            _building_cooldowns[b["id"]] = now + BUILDING_COOLDOWN_SECONDS
+            print("Batiment #" + str(b["id"]) + " mis de cote pour " +
+                  str(BUILDING_COOLDOWN_SECONDS // 60) + " minutes.")
+        elif result["status"] == "started" and result.get("end_time"):
+            queue_end_times[b["id"]] = result["end_time"]
         # Signal de vie apres chaque batiment - avec beaucoup de batiments,
         # cette boucle peut prendre assez de temps pour declencher une
         # coupure de session si on n'envoie rien entre-temps.
         sock.sendall(keepalive)
         recv_all(sock, drain_seconds=1)
 
+    if queue_end_times:
+        next_check_time = min(queue_end_times.values())
+    else:
+        next_check_time = now + 120
 
-def smart_loop(sock, end_times, next_check, td_city_grid=None):
+    return next_check_time
+
+
+def smart_loop(sock, end_times, next_check, td_city_grid=None, next_building_check=None):
     """Boucle principale : garde la session vivante (keepalive toutes les
     5s), surveille les notifications de fin d'entrainement (une par
     caserne active) poussees spontanement par le serveur, et relance
@@ -168,6 +275,8 @@ def smart_loop(sock, end_times, next_check, td_city_grid=None):
     keepalive = bytes.fromhex("04001627")  # kMsgCL2GSKeepLiveRequest = 10006
     resources = ResourceTracker()
     next_resource_print = int(time.time()) + 120
+    if next_building_check is None:
+        next_building_check = int(time.time()) + 30  # premiere verification rapide
 
     if TD_CITY_AREA_ID and td_city_grid:
         print("TDCity : prochaine case a explorer = " + str(td_city_grid) +
@@ -221,6 +330,12 @@ def smart_loop(sock, end_times, next_check, td_city_grid=None):
 
             now = int(time.time())
 
+            # Batiments : verifie a l'heure de fin exacte connue (comme les
+            # casernes), pas a intervalle fixe.
+            if AUTO_UPGRADE_ALL_BUILDINGS and now >= next_building_check:
+                new_next = upgrade_all_available_buildings(sock)
+                next_building_check = new_next if new_next else now + 120
+
             if now >= next_resource_print:
                 resources.print_summary()
                 city_resources = get_city_resources(sock)
@@ -230,11 +345,25 @@ def smart_loop(sock, end_times, next_check, td_city_grid=None):
                 if ENABLE_GUILD_FEATURES:
                     check_and_collect_guild_resource(sock)
                     help_guild_members(sock)
-                upgrade_all_available_buildings(sock)
 
                 if ENABLE_GUILD_FEATURES and GUILD_TECH_ID:
                     donate_guild_tech(sock, GUILD_TECH_ID, GUILD_TECH_LEVEL,
                                        times=GUILD_TECH_DONATE_TIMES)
+
+                if PERSONAL_TECH_ID:
+                    if not claim_research(sock, PERSONAL_TECH_ID):
+                        start_research(sock, PERSONAL_TECH_ID)
+
+                if CLAIM_CHAPTER_AWARD:
+                    claim_chapter_award(sock)
+
+                for task_id in DAILY_TASK_IDS:
+                    time.sleep(1)
+                    claim_daily_task_award(sock, task_id)
+
+                for hero_id in HERO_TALENT_IDS:
+                    time.sleep(1)
+                    upgrade_hero_talent_recommended(sock, hero_id)
 
                 for cid in CITIZEN_COLLECT_IDS:
                     time.sleep(1)
@@ -262,6 +391,20 @@ def smart_loop(sock, end_times, next_check, td_city_grid=None):
                         else:
                             print("Case non gagnee (perdue, ou pas encore accessible) -")
                             print("on retentera la meme case au prochain cycle.")
+
+                if AUTO_ATTACK_MONSTERS and BATTLE_HERO1 and BATTLE_HERO2 and BATTLE_TROOPS:
+                    # Signal de vie avant l'attaque : ce point du cycle
+                    # arrive apres deja plusieurs actions (ressources,
+                    # guilde, taches...), et la reponse de CreateMarchRequest
+                    # peut etre tres volumineuse - une coupure a ete
+                    # observee juste apres une attaque reussie, au moment
+                    # du keepalive suivant.
+                    sock.sendall(keepalive)
+                    recv_all(sock, drain_seconds=1)
+                    search_and_attack_corrupted(sock, MONSTER_ATTACK_LEVEL,
+                                                 BATTLE_HERO1, BATTLE_HERO2, BATTLE_TROOPS)
+                    sock.sendall(keepalive)
+                    recv_all(sock, drain_seconds=1)
 
                 next_resource_print = now + 120
 
@@ -327,8 +470,14 @@ def _run_startup_sequence(sock):
         sock.sendall(keepalive)
         recv_all(sock, drain_seconds=1)
 
-    collect_privilege_escrow_reward(sock)
-    ping()
+    # Gains hors ligne (PrivilegeEscrow) : desactive par defaut. Renvoie
+    # systematiquement vide malgre plusieurs captures reseau dediees -
+    # semble calcule cote client, sans reelle utilite pour un bot qui
+    # tourne en continu (jamais de vraie "periode hors ligne" a compenser).
+    # La fonction reste disponible dans fatewar_actions_rewards.py si tu
+    # veux la reactiver/investiguer davantage.
+    # collect_privilege_escrow_reward(sock)
+    # ping()
 
     time.sleep(1)
     collectibles = check_collectible_resources(sock)
@@ -377,6 +526,27 @@ def _run_startup_sequence(sock):
         donate_guild_tech(sock, GUILD_TECH_ID, GUILD_TECH_LEVEL, times=GUILD_TECH_DONATE_TIMES)
         ping()
 
+    if PERSONAL_TECH_ID:
+        time.sleep(1)
+        if not claim_research(sock, PERSONAL_TECH_ID):
+            start_research(sock, PERSONAL_TECH_ID)
+        ping()
+
+    if CLAIM_CHAPTER_AWARD:
+        time.sleep(1)
+        claim_chapter_award(sock)
+        ping()
+
+    for task_id in DAILY_TASK_IDS:
+        time.sleep(1)
+        claim_daily_task_award(sock, task_id)
+    ping()
+
+    for hero_id in HERO_TALENT_IDS:
+        time.sleep(1)
+        upgrade_hero_talent_recommended(sock, hero_id)
+    ping()
+
     for cid in CITIZEN_COLLECT_IDS:
         time.sleep(1)
         collect_citizen_settle(sock, cid)
@@ -401,10 +571,10 @@ def _run_startup_sequence(sock):
     ping()
 
     time.sleep(1)
-    upgrade_all_available_buildings(sock)
+    next_building_check = upgrade_all_available_buildings(sock)
     ping()
 
-    smart_loop(sock, end_times, next_check, td_city_grid)
+    smart_loop(sock, end_times, next_check, td_city_grid, next_building_check)
 
 
 def main():
