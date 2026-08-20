@@ -100,7 +100,7 @@ Sur les **deux appareils**, place les fichiers nécessaires dans le même
 dossier (voir tableau ci-dessous) :
 
 ```bash
-git clone https://github.com/toncompte/fatewar-bot.git
+git clone 
 cd fatewar-bot
 cp config.example.py config.py
 cp bot_config.example.py bot_config.py
