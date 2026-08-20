@@ -45,6 +45,7 @@
 | ⏱️ **Pas de bot continu sur iOS** | Les apps iOS étant suspendues en arrière-plan, a-Shell ne peut pas faire tourner un bot pendant des heures — d'où l'architecture à deux appareils ci-dessous. |
 | 🚦 **Rate-limit possible** | Une limitation de fréquence semble exister sur les tentatives de connexion au Login Server après plusieurs tentatives rapprochées — laisse reposer 1-2h si ça persiste. |
 | ⚔️ **Combat automatique = risque élevé** | La fonctionnalité d'attaque de monstres envoie de vraies troupes. Vérifie toujours ta configuration avant de l'activer. |
+| ⚡ **Points d'action limités** | Les attaques de Corrompus consomment une ressource "points d'action" qui se régénère lentement (code d'erreur `5030`). Ce n'est pas un bug : le bot réessaiera automatiquement au cycle suivant. |
 | 🕐 **Maintenance serveur** | Une coupure après plusieurs heures de fonctionnement continu peut simplement correspondre à une maintenance planifiée côté serveur, pas un bug du bot. |
 
 ---
@@ -83,6 +84,7 @@ la première nécessite un appareil Apple ; la seconde peut tourner
 | `fatewar_actions_misc.py` | Recherche personnelle, récompenses de chapitre/quotidiennes, talent de héros, soin à l'hôpital |
 | `fatewar_actions_battle.py` | Recherche et attaque automatique de monstres Corrompus |
 | `fatewar_troop_data.py` | **Données de jeu extraites via AssetStudio** — coût par unité de 321 troupes, capacité de caserne par niveau (0-30), quantité de troupes recommandée par niveau de Corrompu (1-30) |
+| `fatewar_building_data.py` | **Données de jeu extraites via AssetStudio** — coûts et prérequis d'amélioration pour 795 combinaisons bâtiment/niveau, vérification préalable avant tentative réseau |
 | `fatewar_names.py` | **Traductions extraites via AssetStudio** — 43 noms de héros, 44 noms de bâtiments |
 | `fatewar_resources.py` | Totaux de ressources en temps réel, liste des bâtiments de la ville |
 | `gs_bot.py` | **Script principal (Pi)** — orchestre tous les modules ci-dessus, lit `bot_config.py` |
@@ -100,7 +102,7 @@ Sur les **deux appareils**, place les fichiers nécessaires dans le même
 dossier (voir tableau ci-dessous) :
 
 ```bash
-git clone 
+git clone https://github.com/toncompte/fatewar-bot.git
 cd fatewar-bot
 cp config.example.py config.py
 cp bot_config.example.py bot_config.py
@@ -132,6 +134,7 @@ PI_HOST = "192.168.1.XXX"   # trouve-la avec "hostname -I" sur le Pi
 | `fatewar_actions_misc.py` | ❌ | ✅ |
 | `fatewar_actions_battle.py` | ❌ | ✅ |
 | `fatewar_troop_data.py` | ❌ | ✅ |
+| `fatewar_building_data.py` | ❌ | ✅ |
 | `fatewar_names.py` | ❌ | ✅ |
 | `fatewar_resources.py` | ❌ | ✅ |
 | `ls_login.py` | ✅ | ❌ |
@@ -227,9 +230,9 @@ cp config.example.py config.py
 | **Maintien de session** | ✅ Stable | `fatewar_login.py` | Keepalive natif du jeu, toutes les 5s |
 | **Entraînement multi-casernes** | ✅ Stable | `fatewar_actions_troops.py` | Quantité "max" **calculée directement** (niveau de caserne + coût réel + ressources) |
 | **Récupération de troupes** | ✅ Stable | `fatewar_actions_troops.py` | Distingue "encore en cours" de "caserne vide" |
-| **Amélioration de tous les bâtiments** | ✅ Stable | `fatewar_actions_building.py` | Découverte auto, gestion des files simultanées, noms lisibles |
+| **Amélioration de tous les bâtiments** | ✅ Stable | `fatewar_actions_building.py` | Découverte auto, **vérification préalable des coûts/prérequis réels** avant tentative réseau, noms lisibles |
 | **Recherche personnelle** | ✅ Stable | `fatewar_actions_misc.py` | Lance et réclame automatiquement |
-| **Combat automatique contre Corrompus** | ✅ Stable (risqué) | `fatewar_actions_battle.py` | Recherche par niveau, attaque immédiate, **quantité de troupes calculée automatiquement** selon le niveau |
+| **Combat automatique contre Corrompus** | ✅ Stable (risqué) | `fatewar_actions_battle.py` | Recherche par niveau, attaque immédiate, **quantité de troupes calculée automatiquement**, gère la limite de points d'action |
 | **Soin à l'hôpital** | 🔧 Disponible, pas automatisé | `fatewar_actions_misc.py` | Nécessite de connaître le nombre de blessés par type |
 | **Tâches (guilde/principales/chapitre/quotidiennes)** | ✅ Stable | plusieurs modules | Écoute continue ou réclamation groupée |
 | **Courrier** | ✅ Stable | `fatewar_actions_rewards.py` | Détection et réclamation automatique |
@@ -297,12 +300,14 @@ sans passer par une capture réseau.
 1. Ouvre AssetStudio, charge le dossier `assets` extrait de l'APK
 2. Configure le support IL2Cpp avec `global-metadata.dat` + `libil2cpp.so`
 3. Filtre par type `MonoBehaviour`, cherche par nom (`troop`, `hero`,
-   `city_building`, `city_barracks_lv`, `science`, `monster`, `string_fr`...)
+   `city_building`, `city_barracks_lv`, `city_building_level`, `science`,
+   `monster`, `string_fr`...)
 4. Onglet **Dump** pour voir le contenu structuré, **Export** pour extraire
 
 **Déjà extrait et intégré :**
 - `troop` (321 troupes) → coût en ressources par unité (`fatewar_troop_data.py`)
 - `city_barracks_lv` (niveaux 0-30) → capacité de la file d'entraînement par niveau de caserne
+- `city_building_level` (795 combinaisons bâtiment/niveau) → coûts **et prérequis** d'amélioration de bâtiments (`fatewar_building_data.py`)
 - `monster` (4914 entrées, filtré sur `MonsterTypeId=1003`) → quantité de troupes recommandée par niveau de Corrompu (niveaux 1-30)
 - `string_fr` (30958 entrées) → **table de traduction complète** : noms de héros (`hero_nameXXXXX`) et bâtiments (`ss_buildingnameXXXX`)
 - `city_building` → structure des bâtiments, clé de nommage
@@ -311,7 +316,7 @@ sans passer par une capture réseau.
 **Pistes tentées sans succès** (recherches infructueuses malgré plusieurs essais) :
 - Table des types de ressources/monnaies (`CurrencyType`) — les codes `2414`/`2424` restent non identifiés, aucune table nommée de façon évidente trouvée
 - Recherche de guilde (`GuildTech`) — semble ne pas exister sous ce nom, ou structure différente non identifiée
-- **Liste complète du roster de héros possédés** — malgré deux captures ciblées et une recherche exhaustive de la rafale de connexion initiale (81 types de messages, contenu compressé inclus), aucune requête dédiée n'a été trouvée. Conclusion retenue : cette donnée est probablement mise en cache côté client dès la création du compte et n'est plus jamais retransmise par le réseau par la suite. Solution de contournement : les héros peuvent être identifiés par leur **nom** directement via `string_fr.json` → `fatewar_names.py` (HERO_NAMES), sans capture réseau.
+- **Liste complète du roster de héros possédés** — malgré deux captures ciblées et une recherche exhaustive de la rafale de connexion initiale (81 types de messages, contenu compressé inclus), aucune requête dédiée n'a été trouvée. Conclusion retenue : cette donnée est probablement mise en cache côté client dès la création du compte et n'est plus jamais retransmise par le réseau. Solution de contournement : les héros peuvent être identifiés par leur **nom** directement via `string_fr.json` → `fatewar_names.py` (HERO_NAMES), sans capture réseau.
 
 **Autres pistes possibles pour qui veut continuer :**
 - `item` — pour le soin à l'hôpital (types de troupes blessées) et de futures fonctionnalités liées aux objets
@@ -410,10 +415,8 @@ Le champ "type" de `PlayerAttribute` est une **catégorie générale**
 (`kPlayerAttrCurrency=1` regroupe TOUTES les monnaies confondues), pas un
 identifiant précis — c'est le champ "sub_type", totalement ignoré par le
 code jusque-là, qui précise LEQUEL. Ce bug expliquait un "faux pic"
-observé bien plus tôt dans le projet (un autre type d'attribut, comme la
-Puissance, partageant occasionnellement une valeur dans la même
-fourchette que la monnaie) — corrigé en suivant désormais les deux
-champs ensemble.
+observé bien plus tôt dans le projet — corrigé en suivant désormais les
+deux champs ensemble.
 
 **Percée AssetStudio : calcul direct du max de troupes**
 Face à l'impossibilité d'obtenir le "maximum entraînable" par le réseau,
@@ -428,8 +431,7 @@ passage l'étiquetage erroné des casernes. L'extraction de `monster.json`
 (filtrée sur le bon `MonsterTypeId`, après une première tentative
 incohérente qui mélangeait tous les types de monstres) a révélé la vraie
 table "niveau → quantité de troupes recommandée", rendant le système de
-combat automatique **totalement autonome** : recherche, calcul de la
-composition, attaque, sans plus aucune valeur à deviner manuellement.
+combat automatique **totalement autonome**.
 
 **La chasse infructueuse au roster de héros**
 Recherche exhaustive sur deux captures réseau ciblées (dont une avec des
@@ -438,8 +440,27 @@ héros" trouvée. Plusieurs fausses pistes prometteuses écartées après
 vérification du contenu réel (une liste de primes/courrier partageait par
 coïncidence des motifs numériques avec des ID de héros). Conclusion : les
 héros possédés ne sont visibles que par sous-produit de données d'Arène
-PvP (formations de défense), qui ne couvrent pas forcément l'intégralité
-du roster — la table de noms par ID reste la méthode la plus fiable.
+PvP, qui ne couvrent pas forcément l'intégralité du roster — la table de
+noms par ID reste la méthode la plus fiable.
+
+**Percée AssetStudio : coûts d'amélioration des bâtiments**
+L'extraction de `city_building_level` (795 combinaisons bâtiment/niveau)
+a permis de reproduire, pour les bâtiments, le même gain que pour les
+troupes : vérification des coûts et prérequis **avant** de tenter une
+amélioration, plutôt qu'à l'aveugle. Piège rencontré et corrigé pendant
+l'intégration : dans les données source, le champ "Level" de chaque
+entrée correspond au niveau **cible** (celui qu'on atteint après
+amélioration), pas au niveau de départ — un décalage d'indice qui aurait
+silencieusement invalidé tous les résultats de la vérification des
+prérequis s'il n'avait pas été testé et repéré avant intégration.
+
+**Découverte de la limite de "points d'action" en combat**
+Un échec d'attaque avec le code d'erreur `5030` (`kEcMapApNotEnough`) a
+révélé une ressource jusque-là jamais suivie : les attaques de Corrompus
+consomment des "points d'action" limités, qui se régénèrent lentement
+dans le temps — un vrai plafond du jeu, pas un bug. Le bot continue de
+retenter automatiquement au cycle suivant sans conséquence négative
+(aucune ressource perdue lors d'un échec).
 
 ---
 
@@ -447,6 +468,7 @@ du roster — la table de noms par ID reste la méthode la plus fiable.
 
 - [ ] Table de traduction des codes de ressources mystères (`2414`/`2424`)
 - [ ] Résultat du combat contre un Corrompu (victoire/défaite, butin) — on sait lancer l'attaque, pas encore suivre son issue
+- [ ] Suivi précis des "points d'action" (voir erreur `5030`) pour espacer intelligemment les tentatives d'attaque plutôt que réessayer à intervalle fixe
 - [ ] Système d'auto-combat natif du jeu (`StartAutoFightMonsterRequest`) — repéré mais jamais capturé en usage réel
 - [ ] Requête dédiée de liste du roster de héros (recherche exhaustive déjà tentée, sans succès)
 - [ ] Sign-in quotidien (jamais confirmé fonctionnel)
@@ -505,7 +527,8 @@ depuis les assets Unity du jeu.
 1. Trouve le nom de classe C# probable dans `dump.cs`
 2. Cherche ce nom (ou une variante proche) dans AssetStudio, filtre `MonoBehaviour`
 3. Vérifie que le contenu correspond (champs cohérents, valeurs plausibles) avant d'intégrer
-4. **Attention aux tables mélangeant plusieurs sous-catégories** (comme `monster.json`) — vérifie toujours la cohérence des valeurs en filtrant sur le bon identifiant avant de faire confiance aux données
+4. **Attention aux tables mélangeant plusieurs sous-catégories** (comme `monster.json`) — vérifie toujours la cohérence des valeurs en filtrant sur le bon identifiant
+5. **Attention aux conventions d'indexation** (niveau cible vs niveau de départ, comme `city_building_level`) — teste toujours avec des valeurs connues avant de faire confiance aux résultats
 
 ---
 

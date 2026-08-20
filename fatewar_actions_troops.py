@@ -219,7 +219,9 @@ def train_max_troops(sock, barrack_id, army_id, candidates=None,
             candidates = [c for c in candidates if c != calculated]
 
     print("\n=== Recherche de la quantite maximale entrainable ===")
-    for count in candidates:
+    from fatewar_core import build_frame, recv_all as _recv_all
+    keepalive = build_frame("1627", b"")  # kMsgCL2GSKeepLiveRequest = 10006
+    for i, count in enumerate(candidates):
         result = train_troops(sock, barrack_id, army_id, count)
         if result["status"] == "started":
             return result
@@ -227,7 +229,13 @@ def train_max_troops(sock, barrack_id, army_id, candidates=None,
             # Caserne occupee - pas la peine de continuer a essayer
             # d'autres quantites, le probleme n'est pas la quantite.
             return result
-        # "insufficient_resources" ou "error" -> on essaie plus petit
+        # "insufficient_resources" ou "error" -> on essaie plus petit.
+        # Signal de vie tous les 3 essais : plusieurs tentatives rapprochees
+        # sans rien envoyer entre-temps ont deja provoque des coupures de
+        # connexion en pratique (observe avec 4-5 essais consecutifs).
+        if (i + 1) % 3 == 0:
+            sock.sendall(keepalive)
+            _recv_all(sock, drain_seconds=1)
         time.sleep(1)
 
     print("Aucune quantite testee n'a fonctionne (meme 1 unite).")

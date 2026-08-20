@@ -73,6 +73,7 @@ from fatewar_actions_misc import (
     upgrade_hero_talent_recommended,
 )
 from fatewar_actions_battle import search_and_attack_corrupted
+from fatewar_building_data import can_upgrade_now
 
 # Capture tout ce qui s'affiche a l'ecran (pas seulement les evenements
 # notables) dans fatewar_debug.log, avec horodatage par ligne. Utile pour
@@ -244,6 +245,38 @@ def upgrade_all_available_buildings(sock):
         else:
             candidates = [t for t in _building_cooldowns.values() if t > now]
             next_check_time = min(candidates) if candidates else now + 300
+        return next_check_time
+
+    # Verification prealable (couts + prerequis reels, extraits de la
+    # config du jeu via AssetStudio - voir fatewar_building_data.py) avant
+    # de tenter reseau : evite de gaspiller une requete + de mettre a tort
+    # un batiment en cooldown "not_eligible" alors que le vrai probleme
+    # est juste un manque de ressources temporaire (qui se resoudra tout
+    # seul avec le temps, pas la peine d'attendre un cooldown complet).
+    all_building_levels = {b.get("type"): b.get("level") for b in buildings}
+    time.sleep(1)
+    city_resources = get_city_resources(sock)
+    available_resources = {
+        TYPE_CODE_TO_CURRENCY[tc]: val
+        for tc, val in city_resources.items()
+        if tc in TYPE_CODE_TO_CURRENCY
+    }
+
+    still_eligible = []
+    for b in eligible:
+        can_upgrade, reason = can_upgrade_now(
+            b.get("type"), b.get("level"), available_resources, all_building_levels)
+        if can_upgrade:
+            still_eligible.append(b)
+        else:
+            print("Batiment #" + str(b["id"]) + " (type " + str(b.get("type")) +
+                  ") ecarte pour l'instant : " + str(reason))
+    eligible = still_eligible
+
+    if not eligible:
+        print("Aucun batiment reellement pret a ameliorer pour l'instant " +
+              "(ressources ou prerequis manquants).")
+        next_check_time = now + 120
         return next_check_time
 
     to_attempt = eligible[:available_slots]
