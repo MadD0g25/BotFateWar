@@ -17,6 +17,7 @@ from bot_config import (
     BATTLE_HERO1,
     BATTLE_HERO2,
     BATTLE_TROOPS,
+    BATTLE_AUTO_TROOP_ARMY_ID,
     PERSONAL_TECH_ID,
     CLAIM_CHAPTER_AWARD,
     HERO_TALENT_IDS,
@@ -109,7 +110,32 @@ def persist_td_city_grid(grid):
     save_state(state)
 
 
-def process_barrack(sock, slot, end_times, next_check):
+def fetch_buildings_and_resources(sock):
+    """Recupere la liste complete des batiments et les ressources
+    actuelles, en UN SEUL appel de chaque (2 appels reseau au total). A
+    utiliser UNE SEULE FOIS par passage sur TRAINING_SLOTS, puis reutiliser
+    pour toutes les casernes en mode "max" - evite de repeter ces gros
+    appels reseau pour chaque caserne individuellement (source
+    d'instabilite observee en pratique avec plusieurs casernes en mode
+    "max" dans le meme cycle)."""
+    buildings = []
+    available_resources = None
+    try:
+        buildings = get_city_buildings(sock)
+        time.sleep(1)
+        city_resources = get_city_resources(sock)
+        available_resources = {
+            TYPE_CODE_TO_CURRENCY[tc]: val
+            for tc, val in city_resources.items()
+            if tc in TYPE_CODE_TO_CURRENCY
+        }
+    except Exception:
+        pass  # en cas de souci, train_max_troops utilisera le tatonnement
+    return buildings, available_resources
+
+
+def process_barrack(sock, slot, end_times, next_check, barrack_level=None,
+                     available_resources=None):
     """Logique complete pour une caserne :
     1. Regarde d'abord si un entrainement est deja en cours (tentative de
        recuperation - si ca echoue avec 'still_training', on sait qu'il
@@ -118,7 +144,13 @@ def process_barrack(sock, slot, end_times, next_check):
        tente de lancer un nouvel entrainement.
     3. Si le lancement echoue par manque de ressources, note-le et attend
        plus longtemps avant de retenter.
-    4. Si le lancement reussit, note l'heure de fin exacte."""
+    4. Si le lancement reussit, note l'heure de fin exacte.
+
+    barrack_level/available_resources : donnees deja recuperees par
+    l'appelant (voir fetch_barrack_level_and_resources), pour eviter que
+    chaque caserne ne refasse independamment les memes gros appels
+    reseau (liste des batiments + ressources) - source d'instabilite
+    observee en pratique avec plusieurs casernes en mode "max"."""
     bid = slot["barrack_id"]
     print("\n--- Caserne " + str(bid) + " ---")
 
@@ -136,28 +168,6 @@ def process_barrack(sock, slot, end_times, next_check):
 
     time.sleep(1)
     if slot["count"] == "max":
-        # Recupere le niveau de la caserne et les ressources actuelles
-        # pour calculer directement la quantite max (voir
-        # fatewar_troop_data.py) au lieu de tatonner par essais reseau -
-        # si l'un des deux echoue, train_max_troops retombe automatiquement
-        # sur le tatonnement classique.
-        barrack_level = None
-        available_resources = None
-        try:
-            buildings = get_city_buildings(sock)
-            for b in buildings:
-                if b.get("id") == bid:
-                    barrack_level = b.get("level")
-                    break
-            time.sleep(1)
-            city_resources = get_city_resources(sock)
-            available_resources = {
-                TYPE_CODE_TO_CURRENCY[tc]: val
-                for tc, val in city_resources.items()
-                if tc in TYPE_CODE_TO_CURRENCY
-            }
-        except Exception:
-            pass  # en cas de souci, train_max_troops utilisera le tatonnement
         train_result = train_max_troops(sock, bid, slot["army_id"],
                                          barrack_level=barrack_level,
                                          available_resources=available_resources)
@@ -392,7 +402,9 @@ def smart_loop(sock, end_times, next_check, td_city_grid=None, next_building_che
                             print("Case non gagnee (perdue, ou pas encore accessible) -")
                             print("on retentera la meme case au prochain cycle.")
 
-                if AUTO_ATTACK_MONSTERS and BATTLE_HERO1 and BATTLE_HERO2 and BATTLE_TROOPS:
+                battle_ready = AUTO_ATTACK_MONSTERS and BATTLE_HERO1 and BATTLE_HERO2 and \
+                    (BATTLE_TROOPS or BATTLE_AUTO_TROOP_ARMY_ID)
+                if battle_ready:
                     # Signal de vie avant l'attaque : ce point du cycle
                     # arrive apres deja plusieurs actions (ressources,
                     # guilde, taches...), et la reponse de CreateMarchRequest
@@ -401,20 +413,53 @@ def smart_loop(sock, end_times, next_check, td_city_grid=None, next_building_che
                     # du keepalive suivant.
                     sock.sendall(keepalive)
                     recv_all(sock, drain_seconds=1)
-                    search_and_attack_corrupted(sock, MONSTER_ATTACK_LEVEL,
-                                                 BATTLE_HERO1, BATTLE_HERO2, BATTLE_TROOPS)
+                    search_and_attack_corrupted(
+                        sock, MONSTER_ATTACK_LEVEL, BATTLE_HERO1, BATTLE_HERO2,
+                        troops=BATTLE_TROOPS if BATTLE_TROOPS else None,
+                        auto_troop_army_id=BATTLE_AUTO_TROOP_ARMY_ID,
+                    )
                     sock.sendall(keepalive)
                     recv_all(sock, drain_seconds=1)
 
                 next_resource_print = now + 120
 
+                # Signal de vie supplementaire ici : ce bloc periodique
+                # (batiments, ressources, guilde, combats) peut parfois
+                # prendre plusieurs dizaines de secondes cumulees (observe :
+                # ~40s sur une session ou une coupure a suivi juste apres,
+                # a l'entree dans la boucle des casernes). Cette marge de
+                # securite evite que l'entrainement suivant ne parte sur
+                # une connexion deja fragilisee.
+                sock.sendall(keepalive)
+                recv_all(sock, drain_seconds=1)
+
+            slots_to_try = []
             for slot in TRAINING_SLOTS:
                 bid = slot["barrack_id"]
                 et = end_times.get(bid)
                 nc = next_check.get(bid)
-                should_try = (et and now >= et) or (nc and now >= nc)
-                if should_try:
-                    process_barrack(sock, slot, end_times, next_check)
+                if (et and now >= et) or (nc and now >= nc):
+                    slots_to_try.append(slot)
+
+            if slots_to_try:
+                # Une seule recuperation batiments+ressources pour TOUTES
+                # les casernes a traiter ce tour-ci (au lieu d'une par
+                # caserne) - evite de multiplier les gros appels reseau.
+                needs_calc = any(s["count"] == "max" for s in slots_to_try)
+                buildings, available_resources = (
+                    fetch_buildings_and_resources(sock) if needs_calc else ([], None)
+                )
+                for slot in slots_to_try:
+                    bid = slot["barrack_id"]
+                    barrack_level = None
+                    if slot["count"] == "max":
+                        for b in buildings:
+                            if b.get("id") == bid:
+                                barrack_level = b.get("level")
+                                break
+                    process_barrack(sock, slot, end_times, next_check,
+                                     barrack_level=barrack_level,
+                                     available_resources=available_resources)
                     time.sleep(1)
 
     except KeyboardInterrupt:
@@ -491,6 +536,7 @@ def _run_startup_sequence(sock):
     next_check = {}
     now = int(time.time())
 
+    slots_needing_processing = []
     for slot in TRAINING_SLOTS:
         bid = slot["barrack_id"]
         saved_et = saved_state.get("barrack:" + str(bid))
@@ -498,9 +544,26 @@ def _run_startup_sequence(sock):
             print("\n--- Caserne " + str(bid) + " : timestamp sauvegarde encore valide ---")
             end_times[bid] = saved_et
             continue
-        time.sleep(1)
-        process_barrack(sock, slot, end_times, next_check)
-        ping()
+        slots_needing_processing.append(slot)
+
+    if slots_needing_processing:
+        needs_calc = any(s["count"] == "max" for s in slots_needing_processing)
+        buildings, available_resources = (
+            fetch_buildings_and_resources(sock) if needs_calc else ([], None)
+        )
+        for slot in slots_needing_processing:
+            bid = slot["barrack_id"]
+            barrack_level = None
+            if slot["count"] == "max":
+                for b in buildings:
+                    if b.get("id") == bid:
+                        barrack_level = b.get("level")
+                        break
+            time.sleep(1)
+            process_barrack(sock, slot, end_times, next_check,
+                             barrack_level=barrack_level,
+                             available_resources=available_resources)
+            ping()
 
     persist(end_times)
 

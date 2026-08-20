@@ -177,8 +177,9 @@ def upgrade_hero_talent_recommended(sock, hero_id, page=1):
     automatique du jeu (equivalent au bouton correspondant dans l'app).
     hero_id est propre a ton compte - trouve par capture reseau
     (kMsgCL2GSHeroUpTalentAsRecommendedRequest)."""
-    print("\n=== ACTION : Amelioration talent recommandee (heros=" +
-          str(hero_id) + ") ===")
+    from fatewar_names import HERO_NAMES
+    hero_name = HERO_NAMES.get(hero_id, "Heros " + str(hero_id))
+    print("\n=== ACTION : Amelioration talent recommandee (" + hero_name + ") ===")
     body = encode_field_varint(1, hero_id) + encode_field_varint(2, page)
     packet = build_frame("c934", body)  # ...Request = 13513
     sock.sendall(packet)

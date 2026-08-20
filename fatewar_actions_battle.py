@@ -114,7 +114,11 @@ def attack_monster(sock, target_id, x, y, hero1, hero2, troops):
 
     Confirme par capture reseau reelle (kMsgCL2GSCreateMarchRequest,
     target_type=2=kMarchCommandTarget_Battle)."""
-    print("\n=== ACTION : Attaque de monstre (cible=" + str(target_id) +
+    from fatewar_names import HERO_NAMES
+    h1_name = HERO_NAMES.get(hero1, "Heros " + str(hero1))
+    h2_name = HERO_NAMES.get(hero2, "Heros " + str(hero2))
+    print("\n=== ACTION : Attaque de monstre avec " + h1_name + " et " + h2_name +
+          " (cible=" + str(target_id) +
           ", position=" + str(x) + "," + str(y) + ") ===")
 
     # --- Construction du champ 1 (MarchCommand) ---
@@ -163,14 +167,41 @@ def attack_monster(sock, target_id, x, y, hero1, hero2, troops):
         return True
 
 
-def search_and_attack_corrupted(sock, level, hero1, hero2, troops):
+def search_and_attack_corrupted(sock, level, hero1, hero2, troops=None,
+                                 auto_troop_army_id=None):
     """Combine la recherche et l'attaque en un seul appel : cherche un
     Corrompu au niveau demande, et attaque immediatement s'il y en a un.
+
+    Deux modes de composition d'armee :
+    - troops fourni (liste de dicts {"army_id":..., "count":...}) :
+      composition fixe, utilisee telle quelle.
+    - auto_troop_army_id fourni (et troops absent) : calcule
+      automatiquement la quantite recommandee pour ce niveau precis
+      (voir get_recommended_troop_count dans fatewar_troop_data.py,
+      extrait de la vraie config du jeu - correspond au texte "Troupe
+      recommandee" affiche dans l'app), avec ce seul type de troupe.
+
     Retourne True si l'attaque a ete lancee, False sinon (rien trouve a
-    ce niveau, ou echec de la marche)."""
+    ce niveau, niveau non couvert par la table de recommandation, ou
+    echec de la marche)."""
     target = search_corrupted_monster(sock, level)
     if target is None:
         return False
+
+    if troops is None and auto_troop_army_id is not None:
+        from fatewar_troop_data import get_recommended_troop_count
+        recommended = get_recommended_troop_count(level)
+        if recommended is None:
+            print("Pas de quantite recommandee connue pour le niveau " +
+                  str(level) + " (au-dela des donnees extraites) - abandon.")
+            return False
+        print("Quantite recommandee pour ce niveau : " + str(recommended))
+        troops = [{"army_id": auto_troop_army_id, "count": recommended}]
+
+    if not troops:
+        print("Aucune composition de troupes fournie - abandon.")
+        return False
+
     time.sleep(1)
     return bool(attack_monster(sock, target["target_id"], target["x"], target["y"],
                                 hero1, hero2, troops))

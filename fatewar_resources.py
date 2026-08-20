@@ -5,6 +5,33 @@ from fatewar_core import (
     find_message_of_type, recv_all,
 )
 
+# Categories d'attributs joueur (champ "type" de PlayerAttribute), extrait
+# de dump.cs (enum PlayerAttributeType). IMPORTANT : "type" est une
+# CATEGORIE generale, pas un identifiant de monnaie precis - kPlayerAttrCurrency
+# (1) regroupe TOUTES les monnaies confondues, la monnaie precise est dans
+# le champ "sub_type" (voir CURRENCY_NAMES dans fatewar_actions_rewards.py).
+# Bug corrige : le code affichait auparavant "Emoney" pour TOUT type=1 sans
+# jamais regarder sub_type, et pouvait meme afficher un "faux pic" quand un
+# AUTRE type d'attribut (Puissance, Armee...) partageait par coincidence
+# une valeur proche de celle de la monnaie.
+PLAYER_ATTRIBUTE_TYPE_NAMES = {
+    0: "Aucun", 1: "Monnaie", 2: "Objet", 4: "Exp. heros", 5: "Puissance",
+    6: "Exp. etoile heros", 7: "Monnaie de guilde", 8: "Monnaie du mall",
+    9: "AP", 11: "Heros", 12: "Cadeau de guilde", 13: "Score quotidien",
+    14: "Armee", 15: "Blesses", 16: "Equipement", 17: "Apparence de marche",
+    19: "Exp. honneur", 20: "Carte d'or honneur", 22: "Tete", 23: "Cadre",
+    24: "Technologie", 25: "Skin", 26: "Pass avance",
+    27: "Batiment decoratif", 28: "Statistiques", 29: "Bulle de chat",
+    30: "Titre individuel", 31: "Score activite jalon",
+    32: "Score guilde activite jalon", 33: "Battle pass (paye)",
+    34: "Pass public (paye)", 35: "Skin de marche", 36: "Joyau",
+    37: "Reliques", 38: "Mini-jeu", 39: "Tirage activite", 40: "Fonds",
+    41: "Dette", 42: "Gemmes payees", 43: "Carte de temps",
+    44: "Equipement de heros", 45: "Obtention equipement de heros",
+    54: "Cadeau homme riche", 80: "Paiement caravane commerciale",
+    1003: "Statut", 1004: "Activite du mall", 2001: "Nombre d'ennemis tues",
+}
+
 # Table de correspondance type_code -> ressource, trouvee empiriquement en
 # comparant les valeurs de CityInfoReply avec l'affichage en jeu (a
 # completer/corriger si de nouveaux type_code apparaissent) :
@@ -40,7 +67,10 @@ TYPE_CODE_TO_CURRENCY = {
 
 def parse_player_attributes(response):
     """Cherche des messages PlayerAttribute (10009) et retourne une liste
-    de (type, value, action_type). Ce message sert au client a
+    de (type, sub_type, value, action_type). "type" est une CATEGORIE
+    d'attribut (voir PLAYER_ATTRIBUTE_TYPE_NAMES), "sub_type" precise
+    LEQUEL au sein de cette categorie (ex: type=1/Monnaie + sub_type=1 =
+    Emoney precisement, voir CURRENCY_NAMES). Ce message sert au client a
     synchroniser en temps reel divers attributs du joueur (pas
     exclusivement des ressources - a utiliser avec prudence, voir
     get_city_resources() pour les vrais totaux de ressources)."""
@@ -53,60 +83,54 @@ def parse_player_attributes(response):
             if fn == 1 and wt == "bytes":
                 attr_fields = walk_protobuf(val)
                 atype = None
+                asubtype = None
                 avalue = None
                 aaction = None
                 for afn, awt, aval in attr_fields:
                     if afn == 1:
                         atype = aval
+                    elif afn == 2:
+                        asubtype = aval
                     elif afn == 3:
                         avalue = aval
                     elif afn == 4:
                         aaction = aval
                 if atype is not None and avalue is not None:
-                    results.append((atype, avalue, aaction))
+                    results.append((atype, asubtype, avalue, aaction))
     return results
 
 
 class ResourceTracker:
     """Garde en memoire les derniers totaux connus de chaque attribut
     PlayerAttribute, et estime un taux d'evolution par heure en observant
-    les changements dans le temps. Approximation empirique, pas une donnee
-    officielle du jeu.
+    les changements dans le temps. Approximation empirique, pas une
+    donnee officielle du jeu.
 
-    ATTENTION : le champ 'type' de PlayerAttribute ne semble pas etre
-    exactement le meme enum que CurrencyType - il couvre probablement
-    d'autres statistiques du joueur qui peuvent occasionnellement partager
-    le meme code numerique par coincidence, causant de faux pics isoles
-    (observe en pratique : une valeur ~3.5x plus grande apparue une seule
-    fois puis disparue). Un filtre anti-aberration rejette les sauts trop
-    brusques d'une mise a jour a l'autre plutot que de les enregistrer."""
-
-    MAX_PLAUSIBLE_RATIO = 2.5  # rejette un saut de plus de x2.5 en un seul update
+    CORRIGE : le champ "type" de PlayerAttribute est une CATEGORIE
+    generale (kPlayerAttrCurrency=1 regroupe TOUTES les monnaies, par
+    exemple), pas un identifiant precis - c'est le champ "sub_type" qui
+    precise LEQUEL au sein de la categorie. L'ancien code ignorait
+    sub_type et affichait tout type=1 comme "Emoney", ce qui expliquait
+    aussi le "faux pic" observe autrefois (un AUTRE type d'attribut,
+    comme Puissance ou Armee, partageait occasionnellement une valeur
+    dans la meme fourchette). Desormais suivi par (type, sub_type)."""
 
     def __init__(self, history_window_seconds=600):
         self.history_window = history_window_seconds
-        self.history = {}  # type -> liste de (timestamp, value)
-        self.latest = {}   # type -> valeur la plus recente connue
+        self.history = {}  # (type,sub_type) -> liste de (timestamp, value)
+        self.latest = {}   # (type,sub_type) -> valeur la plus recente connue
 
     def update(self, attributes):
         now = time.time()
-        for atype, avalue, aaction in attributes:
-            previous = self.latest.get(atype)
-            if previous and previous > 0:
-                ratio = avalue / previous if avalue >= previous else previous / avalue
-                if ratio > self.MAX_PLAUSIBLE_RATIO:
-                    # Saut trop brusque pour etre plausible - probablement
-                    # un attribut different qui partage temporairement le
-                    # meme type_code. On ignore ce point plutot que de
-                    # polluer l'historique et fausser le taux estime.
-                    continue
-            self.latest[atype] = avalue
-            self.history.setdefault(atype, []).append((now, avalue))
+        for atype, asubtype, avalue, aaction in attributes:
+            key = (atype, asubtype)
+            self.latest[key] = avalue
+            self.history.setdefault(key, []).append((now, avalue))
             cutoff = now - self.history_window
-            self.history[atype] = [(t, v) for t, v in self.history[atype] if t >= cutoff]
+            self.history[key] = [(t, v) for t, v in self.history[key] if t >= cutoff]
 
-    def estimated_rate_per_hour(self, atype):
-        points = self.history.get(atype, [])
+    def estimated_rate_per_hour(self, key):
+        points = self.history.get(key, [])
         if len(points) < 2:
             return None
         t_first, v_first = points[0]
@@ -122,10 +146,17 @@ class ResourceTracker:
         if not self.latest:
             print("  Aucune donnee recue pour l'instant.")
             return
-        for atype in sorted(self.latest):
-            name = CURRENCY_NAMES.get(atype, "Type " + str(atype))
-            value = self.latest[atype]
-            rate = self.estimated_rate_per_hour(atype)
+        for key in sorted(self.latest, key=lambda k: (k[0], k[1] or 0)):
+            atype, asubtype = key
+            category = PLAYER_ATTRIBUTE_TYPE_NAMES.get(atype, "Type " + str(atype))
+            if atype == 1:  # kPlayerAttrCurrency -> sub_type = vraie monnaie
+                name = CURRENCY_NAMES.get(asubtype, category + " (sous-type " + str(asubtype) + ")")
+            else:
+                name = category
+                if asubtype:
+                    name += " (sous-type " + str(asubtype) + ")"
+            value = self.latest[key]
+            rate = self.estimated_rate_per_hour(key)
             line = "  " + name + " : " + str(value)
             if rate is not None and abs(rate) >= 1:
                 sign = "+" if rate >= 0 else ""
@@ -286,9 +317,11 @@ def get_city_buildings_and_queue(sock):
     for b in buildings:
         by_type.setdefault(b.get("type"), []).append(b)
 
+    from fatewar_names import BUILDING_NAMES
     for btype in sorted(by_type):
         entries = by_type[btype]
-        print("  Type " + str(btype) + " (" + str(len(entries)) + " batiment(s)) :")
+        name = BUILDING_NAMES.get(btype, "Type " + str(btype))
+        print("  " + name + " (" + str(len(entries)) + " batiment(s)) :")
         for b in entries:
             status_name = BUILDING_STATUS_NAMES.get(b.get("status"), "?")
             extra = ""

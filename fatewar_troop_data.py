@@ -391,3 +391,25 @@ def calculate_max_trainable(army_id, barrack_level, available_resources):
     if result == float("inf"):
         return None
     return int(result)
+
+
+# Nombre de troupes T1 recommande par niveau de Corrompu (champ
+# "RecommendNum" de monster.json, MonsterTypeId=1003 - filtre confirme
+# coherent sur les niveaux 1-30, correspond exactement au texte "Troupe
+# recommandee : X guerriers T1" affiche dans l'app avant une attaque).
+# Extrait via AssetStudio (meme source que TROOP_RESOURCE_COSTS).
+MONSTER_RECOMMENDED_TROOPS = {
+    1: 1500, 2: 2000, 3: 2500, 4: 3000, 5: 4000, 6: 5000, 7: 6000,
+    8: 7000, 9: 8000, 10: 9000, 11: 12000, 12: 15000, 13: 18000,
+    14: 21000, 15: 25000, 16: 30000, 17: 35000, 18: 40000, 19: 45000,
+    20: 50000, 21: 60000, 22: 70000, 23: 80000, 24: 90000, 25: 100000,
+    26: 110000, 27: 120000, 28: 130000, 29: 140000, 30: 150000,
+}
+
+
+def get_recommended_troop_count(level):
+    """Retourne le nombre de troupes T1 recommande pour attaquer un
+    Corrompu au niveau donne, ou None si le niveau depasse ce qui a ete
+    confirme (30). Au-dela, prefere garder une composition manuelle fixe
+    (BATTLE_TROOPS) plutot que ce calcul automatique."""
+    return MONSTER_RECOMMENDED_TROOPS.get(level)

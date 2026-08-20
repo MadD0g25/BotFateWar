@@ -81,7 +81,8 @@ PERSONAL_TECH_ID = None
 CLAIM_CHAPTER_AWARD = True
 
 # Talents de heros a ameliorer automatiquement (bouton "recommande" de
-# l'app) : optionnel, liste vide par defaut. hero_id propre a ton compte.
+# l'app) : optionnel, liste vide par defaut. hero_id propre a ton compte
+# (voir fatewar_names.py pour la table de noms connus).
 HERO_TALENT_IDS = []
 
 # Taches quotidiennes a reclamer : optionnel, liste vide par defaut (les
@@ -97,8 +98,8 @@ DAILY_TASK_IDS = []
 # (par niveau choisi) donne directement la cible a attaquer - confirme
 # par capture reseau reelle, bien plus fiable qu'une notification radar
 # passive. Optionnel, desactive par defaut - ATTENTION, action la plus
-# sensible du bot (envoie de vraies troupes), verifie bien que ta config
-# laisse assez de troupes de defense en ville avant d'activer.
+# sensible du bot (envoie de vraies troupes), verifie bien ta config
+# avant d'activer.
 AUTO_ATTACK_MONSTERS = False
 
 # Niveau de Corrompu a rechercher (correspond au curseur "Niveau" dans
@@ -107,14 +108,24 @@ AUTO_ATTACK_MONSTERS = False
 MONSTER_ATTACK_LEVEL = 5
 
 # Heros a envoyer sur chaque attaque - propres a ton compte, trouves par
-# capture reseau (kMsgCL2GSCreateMarchRequest).
+# capture reseau (kMsgCL2GSCreateMarchRequest) ou par nom via AssetStudio
+# (voir fatewar_names.py et le README pour la procedure).
 BATTLE_HERO1 = None
 BATTLE_HERO2 = None
 
-# Composition de troupes a envoyer sur chaque attaque - meme format que
-# TRAINING_SLOTS. ATTENTION : contrairement a l'entrainement, il n'y a
-# pas de mode "max" automatique ici - choisis une quantite qui laisse
-# suffisamment de troupes de defense dans ta ville.
+# Composition de troupes a envoyer sur chaque attaque - deux modes :
+#
+# MODE AUTOMATIQUE (recommande) : laisse BATTLE_TROOPS vide et renseigne
+# BATTLE_AUTO_TROOP_ARMY_ID - le bot calcule automatiquement la quantite
+# recommandee pour le niveau attaque (MONSTER_ATTACK_LEVEL), extraite de
+# la vraie config du jeu (fatewar_troop_data.py, correspond au texte
+# "Troupe recommandee" affiche dans l'app). Un seul type de troupe.
+BATTLE_AUTO_TROOP_ARMY_ID = None
+
+# MODE MANUEL : composition fixe, plusieurs types de troupes possibles.
+# Utilise seulement si BATTLE_AUTO_TROOP_ARMY_ID est None. ATTENTION :
+# contrairement a l'entrainement, il n'y a pas de mode "max" ici - choisis
+# une quantite qui laisse suffisamment de troupes de defense en ville.
 BATTLE_TROOPS = []
 
 
